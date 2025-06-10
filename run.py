@@ -215,8 +215,13 @@ async def handle_download(args, config: DownloadConfig) -> int:
         config.create_year_folders = args.year_folders
         config.progress_file = args.progress_file
         
-        # Create and initialize downloader
-        downloader = await create_downloader(config)
+        # Create downloader (don't initialize Telegram for dry run)
+        downloader = SpotifyDownloader(config)
+        
+        # Only initialize Telegram if not dry run
+        if not args.dry_run:
+            if not await downloader.initialize():
+                return {"success": False, "error": "Failed to initialize Telegram client"}
         
         try:
             # Start download
@@ -354,7 +359,9 @@ async def main() -> int:
     
     # Load configuration
     try:
-        config = DownloadConfig.from_env()
+        # Check if we're doing a dry run
+        is_dry_run = args.dry_run if hasattr(args, 'dry_run') else False
+        config = DownloadConfig.from_env(dry_run=is_dry_run)
     except ValueError as e:
         print(f"{Fore.RED}Configuration Error: {e}{Style.RESET_ALL}")
         print(f"Please check your .env file and ensure all required variables are set.")

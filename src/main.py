@@ -58,10 +58,32 @@ class DownloadConfig:
     session_dir: str = "./sessions"
     
     @classmethod
-    def from_env(cls) -> 'DownloadConfig':
+    def from_env(cls, dry_run: bool = False) -> 'DownloadConfig':
         """Create config from environment variables"""
         load_dotenv()
         
+        # For dry run, only Spotify credentials are required
+        if dry_run:
+            spotify_vars = ['SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET']
+            missing_spotify = [var for var in spotify_vars if not os.getenv(var)]
+            if missing_spotify:
+                raise ValueError(f"Missing required Spotify variables: {', '.join(missing_spotify)}")
+            
+            # Return config with dummy Telegram values for dry run
+            return cls(
+                spotify_client_id=os.getenv('SPOTIFY_CLIENT_ID'),
+                spotify_client_secret=os.getenv('SPOTIFY_CLIENT_SECRET'),
+                telegram_api_id=12345,  # Dummy value
+                telegram_api_hash="dummy_hash",  # Dummy value
+                telegram_phone_number="+1234567890",  # Dummy value
+                external_bot_username="@dummy_bot",  # Dummy value
+                download_folder=os.getenv('DOWNLOAD_FOLDER', './downloads'),
+                delay_between_requests=float(os.getenv('DELAY_BETWEEN_REQUESTS', 3.0)),
+                max_retries=int(os.getenv('MAX_RETRIES', 3)),
+                response_timeout=int(os.getenv('RESPONSE_TIMEOUT', 60)),
+            )
+        
+        # For actual download, all credentials are required
         required_vars = [
             'SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET',
             'TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 

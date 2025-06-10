@@ -43,3 +43,7 @@ logs/
 *.tmp
 *.temp
 .cache/
+
+# Cache files
+cache/
+*.pkl

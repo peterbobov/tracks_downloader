@@ -245,7 +245,7 @@ python telethon_downloader.py --status
 python telethon_downloader.py --reset
 ```
 
-## Current Implementation Status (v2.0.0 - Modular Architecture)
+## Current Implementation Status (v2.0.1 - Modular Architecture)
 
 ✅ **Completed:**
 - **Modular Architecture**: Separated concerns into distinct modules
@@ -377,6 +377,38 @@ RESPONSE_TIMEOUT=60
 5. **Performance**: Caching and optimized operations
 6. **Security**: Centralized credential management
 
+## Recent Updates (January 2025)
+
+### v2.0.1 - Security Fix & Dry Run Enhancement
+- **Security Incident**: Accidentally exposed Spotify credentials were removed
+- **Repository Reset**: Clean history with no exposed credentials
+- **Dry Run Mode**: Now works without Telegram credentials for testing
+- **Git Configuration**: Proper author attribution setup
+
+### Dry Run Testing
+Successfully tested with a 101-track playlist:
+```bash
+python run.py "https://open.spotify.com/playlist/3i1D6J1DTyoGfaXMvz5M8E" --dry-run
+# Output: Found 101 tracks from "Vol rise" playlist
+```
+
+## Security Best Practices Learned
+
+1. **Never edit .env.example with real credentials**
+   - Always use placeholder values in example files
+   - Real credentials go only in .env (which is gitignored)
+
+2. **Quick Response to Credential Exposure**
+   - Immediately revoke exposed credentials
+   - Clean repository history or create fresh repository
+   - Update all affected credentials
+
+3. **Git Configuration**
+   ```bash
+   git config user.name "Your Name"
+   git config user.email "your-email@example.com"
+   ```
+
 ## Future Enhancements
 
 - [ ] Web UI for easier interaction
@@ -387,3 +419,4 @@ RESPONSE_TIMEOUT=60
 - [ ] Cloud storage integration
 - [ ] Docker containerization
 - [ ] API rate limit visualization
+- [ ] Automatic credential validation on startup
