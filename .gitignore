@@ -44,6 +44,7 @@ logs/
 *.temp
 .cache/
 
-# Cache files
+# Cache files (including Spotify cache)
+.cache
 cache/
 *.pkl
