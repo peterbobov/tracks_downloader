@@ -66,6 +66,10 @@ def print_help():
 {Fore.CYAN}OPTIONS:{Style.RESET_ALL}
   --dry-run          Preview tracks without downloading
   --batch-size N     Process N tracks at a time (default: 10)
+  --limit N          Limit to first N tracks (for testing)
+  --start-from N     Start from track number N (1-based, default: 1)
+  --debug            Enable detailed debug logging
+  --sequential       Process tracks one at a time (cleaner progress, slower)
   --no-resume        Don't resume previous session
   --organize-by      artist|album|none (default: artist)
   --year-folders     Create year-based folders
@@ -80,6 +84,18 @@ def print_help():
 
   # Process in smaller batches
   python run.py https://open.spotify.com/playlist/xxxxx --batch-size 5
+
+  # Test with just first track
+  python run.py https://open.spotify.com/playlist/xxxxx --limit 1
+
+  # Enable debug logging
+  python run.py https://open.spotify.com/playlist/xxxxx --debug
+
+  # Sequential processing for cleaner progress
+  python run.py https://open.spotify.com/playlist/xxxxx --sequential
+
+  # Download tracks 16-30 (chunked processing)
+  python run.py https://open.spotify.com/playlist/xxxxx --start-from 16 --limit 15
 
   # Download to specific directory with year folders
   python run.py https://open.spotify.com/playlist/xxxxx --output-dir ./music --year-folders
@@ -139,6 +155,31 @@ def create_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help='Number of tracks to process in each batch (default: 10)'
+    )
+    
+    parser.add_argument(
+        '--limit',
+        type=int,
+        help='Limit number of tracks to process (for testing)'
+    )
+    
+    parser.add_argument(
+        '--start-from',
+        type=int,
+        default=1,
+        help='Track number to start from (1-based index, default: 1)'
+    )
+    
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable detailed debug logging'
+    )
+    
+    parser.add_argument(
+        '--sequential',
+        action='store_true',
+        help='Process tracks one at a time (cleaner progress, slower)'
     )
     
     parser.add_argument(
@@ -218,6 +259,10 @@ async def handle_download(args, config: DownloadConfig) -> int:
         # Create downloader (don't initialize Telegram for dry run)
         downloader = SpotifyDownloader(config)
         
+        # Set debug mode if requested
+        if hasattr(args, 'debug') and args.debug:
+            downloader.set_debug_mode(True)
+        
         # Only initialize Telegram if not dry run
         if not args.dry_run:
             if not await downloader.initialize():
@@ -229,7 +274,10 @@ async def handle_download(args, config: DownloadConfig) -> int:
                 url,
                 dry_run=args.dry_run,
                 batch_size=args.batch_size,
-                resume=not args.no_resume
+                resume=not args.no_resume,
+                limit=args.limit,
+                sequential=args.sequential,
+                start_from=args.start_from
             )
             
             if result['success']:

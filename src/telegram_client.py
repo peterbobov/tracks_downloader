@@ -18,7 +18,13 @@ from dataclasses import dataclass
 
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
-from telethon.tl.types import DocumentAttributeFilename, DocumentAttributeAudio
+from telethon.tl.types import (
+    DocumentAttributeFilename, 
+    DocumentAttributeAudio,
+    MessageMediaPhoto,
+    KeyboardButtonCallback
+)
+from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from colorama import Fore, Style
 
 from .spotify_api import Track
@@ -35,7 +41,7 @@ class TelegramConfig:
     delay_between_requests: float = 3.0
     max_retries: int = 3
     flood_wait_multiplier: float = 1.5
-    response_timeout: int = 60
+    response_timeout: int = 300  # 5 minutes for large file downloads
 
 
 @dataclass
@@ -61,6 +67,9 @@ class TelegramMessenger:
         # Tracking
         self.pending_responses: Dict[int, PendingRequest] = {}
         self.client: Optional[TelegramClient] = None
+        
+        # Debug mode
+        self.debug_mode = False
         
         # Callbacks
         self.on_file_downloaded: Optional[Callable] = None
@@ -129,15 +138,100 @@ class TelegramMessenger:
     
     async def _handle_bot_response(self, event):
         """Handle responses from the bot"""
+        if self.debug_mode:
+            print(f"{Fore.MAGENTA}DEBUG: Received message type - Document: {bool(event.message.document)}, "
+                  f"Buttons: {bool(event.message.buttons)}, Photo: {isinstance(event.message.media, MessageMediaPhoto)}, "
+                  f"Text: {bool(event.message.text)}{Style.RESET_ALL}")
+        
         # Check if message has a document (file)
         if event.message.document:
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}DEBUG: Document detected - MIME: {event.message.document.mime_type}, "
+                      f"Size: {event.message.document.size:,} bytes{Style.RESET_ALL}")
             await self._handle_file_response(event)
+        
+        # Check if message has inline keyboard buttons (track options)
+        elif event.message.buttons:
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}DEBUG: Buttons detected - Count: {len(event.message.buttons)}{Style.RESET_ALL}")
+            await self._handle_button_response(event)
+        
+        # Check if message has an image (nothing found response)
+        elif isinstance(event.message.media, MessageMediaPhoto):
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}DEBUG: Photo detected (nothing found){Style.RESET_ALL}")
+            await self._handle_nothing_found_response(event)
         
         # Handle text responses (errors or status)
         elif event.message.text:
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}DEBUG: Text message detected: {event.message.text[:100]}{Style.RESET_ALL}")
             if self.on_bot_response:
                 await self.on_bot_response(event.message.text)
             print(f"{Fore.YELLOW}Bot response: {event.message.text}{Style.RESET_ALL}")
+        
+        elif self.debug_mode:
+            print(f"{Fore.MAGENTA}DEBUG: Unknown message type detected{Style.RESET_ALL}")
+    
+    async def _handle_button_response(self, event):
+        """Handle button responses from bot (track options)"""
+        # Find matching pending request
+        matched_request = self._find_matching_request()
+        
+        if not matched_request:
+            print(f"{Fore.YELLOW}Received buttons but no matching request found{Style.RESET_ALL}")
+            return
+        
+        track_name = matched_request.track_name
+        
+        # Log button options received
+        print(f"{Fore.CYAN}Bot found options for: {track_name}{Style.RESET_ALL}")
+        
+        # Click the first button automatically
+        try:
+            if event.message.buttons and len(event.message.buttons) > 0:
+                first_row = event.message.buttons[0]
+                if isinstance(first_row, list) and len(first_row) > 0:
+                    first_button = first_row[0]
+                else:
+                    first_button = first_row
+                
+                # Click the button to select track
+                await event.message.click(0)  # Click first button (index 0)
+                print(f"{Fore.GREEN}✓ Selected first option for: {track_name}{Style.RESET_ALL}")
+                
+                # Create new pending request for the file download with updated timestamp
+                new_request = PendingRequest(
+                    track=matched_request.track,
+                    track_name=matched_request.track_name,
+                    sent_at=datetime.now(),  # Reset timestamp for file download phase
+                    message_id=event.message.id
+                )
+                self.pending_responses[event.message.id] = new_request
+                
+        except Exception as e:
+            print(f"{Fore.RED}Error clicking button for {track_name}: {e}{Style.RESET_ALL}")
+            if self.on_download_failed:
+                await self.on_download_failed(matched_request.track, f"Failed to select track option: {e}")
+    
+    async def _handle_nothing_found_response(self, event):
+        """Handle 'nothing found' image responses from bot"""
+        # Find matching pending request
+        matched_request = self._find_matching_request()
+        
+        if not matched_request:
+            print(f"{Fore.YELLOW}Received image but no matching request found{Style.RESET_ALL}")
+            return
+        
+        track = matched_request.track
+        track_name = matched_request.track_name
+        
+        # Log that track was not found
+        print(f"{Fore.YELLOW}⚠ Track not available: {track_name}{Style.RESET_ALL}")
+        
+        # Notify about unavailable track
+        if self.on_download_failed:
+            await self.on_download_failed(track, "Track not found by bot")
     
     async def _handle_file_response(self, event):
         """Handle file responses from bot"""
@@ -157,7 +251,10 @@ class TelegramMessenger:
         # Notify about file reception
         print(f"{Fore.CYAN}Received file for: {track_name}{Style.RESET_ALL}")
         
-        # Return the event and metadata for external handling
+        # Remove from pending responses since we're handling it now
+        # (This prevents the FIFO queue from causing issues)
+        
+        # Handle the download directly
         if self.on_file_downloaded:
             await self.on_file_downloaded(event.message, filename, track, track_name)
     
@@ -269,15 +366,37 @@ class TelegramMessenger:
                     percent = (current / total) * 100 if total > 0 else 0
                     print(f"\rProgress: {current}/{total} bytes ({percent:.1f}%)", end='')
             
-            await self.client.download_media(
-                message,
-                file=str(filepath),
-                progress_callback=default_progress
+            # Add timeout for large file downloads
+            await asyncio.wait_for(
+                self.client.download_media(
+                    message,
+                    file=str(filepath),
+                    progress_callback=default_progress
+                ),
+                timeout=300  # 5 minute timeout
             )
             
             print()  # New line after progress
+            
+            # Verify file was downloaded completely
+            if not filepath.exists():
+                print(f"{Fore.RED}Download failed: File does not exist{Style.RESET_ALL}")
+                return False
+            
+            file_size = filepath.stat().st_size
+            if file_size == 0:
+                print(f"{Fore.RED}Download failed: File is empty{Style.RESET_ALL}")
+                filepath.unlink()
+                return False
+            
+            print(f"{Fore.GREEN}✓ Download complete: {file_size:,} bytes{Style.RESET_ALL}")
             return True
             
+        except asyncio.TimeoutError:
+            print(f"{Fore.RED}Download timeout: File too large or connection slow{Style.RESET_ALL}")
+            if filepath.exists():
+                filepath.unlink()
+            return False
         except Exception as e:
             print(f"{Fore.RED}Download error: {e}{Style.RESET_ALL}")
             if filepath.exists():

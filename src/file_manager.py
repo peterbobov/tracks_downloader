@@ -55,6 +55,9 @@ class FileManager:
         self.download_folder = Path(config.download_folder)
         self.download_folder.mkdir(exist_ok=True, parents=True)
         
+        # Playlist organization
+        self.current_playlist_name = None
+        
         # Statistics
         self.download_stats = {
             'total_downloaded': 0,
@@ -91,33 +94,22 @@ class FileManager:
         
         return filename
     
+    def set_playlist_name(self, playlist_name: str):
+        """Set the current playlist name for file organization"""
+        self.current_playlist_name = playlist_name
+    
     def get_organized_path(self, track: Track, filename: str) -> Path:
         """Get the organized file path based on configuration"""
         base_path = self.download_folder
         
-        # Clean up data for folder names
-        artist_name = self.sanitize_filename(track.artists[0] if track.artists else "Unknown Artist", 50)
-        album_name = self.sanitize_filename(track.album, 50) if track.album else "Unknown Album"
-        
-        # Extract year from release date if available
-        year = ""
-        if track.release_date:
-            try:
-                year = track.release_date.split('-')[0]
-            except:
-                pass
-        
-        # Build path based on organization settings
-        if self.config.organize_by_artist:
+        # Use playlist name for organization if available
+        if self.current_playlist_name:
+            playlist_folder = self.sanitize_filename(self.current_playlist_name, 100)
+            base_path = base_path / playlist_folder
+        else:
+            # Fallback to artist organization
+            artist_name = self.sanitize_filename(track.artists[0] if track.artists else "Unknown Artist", 50)
             base_path = base_path / artist_name
-            
-            if self.config.organize_by_album:
-                album_folder = f"{album_name}"
-                if year and self.config.create_year_folders:
-                    album_folder = f"{year} - {album_name}"
-                base_path = base_path / album_folder
-            elif year and self.config.create_year_folders:
-                base_path = base_path / year
         
         # Create directory if it doesn't exist
         base_path.mkdir(parents=True, exist_ok=True)

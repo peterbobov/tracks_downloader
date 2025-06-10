@@ -12,6 +12,7 @@ Coordinates all components to provide the complete download workflow:
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional, List, Dict, Callable
 from dataclasses import dataclass
@@ -144,6 +145,9 @@ class SpotifyDownloader:
         self.telegram: Optional[TelegramMessenger] = None
         self.current_session_id: Optional[str] = None
         
+        # Debug mode
+        self.debug_mode = False
+        
         # Callbacks for progress reporting
         self.on_track_sent: Optional[Callable] = None
         self.on_track_downloaded: Optional[Callable] = None
@@ -159,6 +163,9 @@ class SpotifyDownloader:
             
             if not await self.telegram.initialize():
                 return False
+            
+            # Set debug mode on telegram client
+            self.telegram.debug_mode = self.debug_mode
             
             # Set up Telegram callbacks
             self.telegram.set_callbacks(
@@ -177,7 +184,10 @@ class SpotifyDownloader:
     async def download_playlist(self, playlist_url: str, 
                               dry_run: bool = False,
                               batch_size: Optional[int] = None,
-                              resume: bool = True) -> Dict:
+                              resume: bool = True,
+                              limit: Optional[int] = None,
+                              sequential: bool = False,
+                              start_from: int = 1) -> Dict:
         """Download all tracks from a Spotify playlist"""
         
         # Check for resumable session
@@ -190,12 +200,12 @@ class SpotifyDownloader:
                 print(f"  Pending: {resume_info['pending_count']} tracks")
                 
                 if input(f"{Fore.CYAN}Resume previous session? (y/n): {Style.RESET_ALL}").lower() == 'y':
-                    return await self._resume_session(dry_run, batch_size)
+                    return await self._resume_session(dry_run, batch_size, limit, sequential, start_from)
         
         # Start new session
-        return await self._start_new_session(playlist_url, dry_run, batch_size)
+        return await self._start_new_session(playlist_url, dry_run, batch_size, limit, sequential, start_from)
     
-    async def _start_new_session(self, playlist_url: str, dry_run: bool, batch_size: Optional[int]) -> Dict:
+    async def _start_new_session(self, playlist_url: str, dry_run: bool, batch_size: Optional[int], limit: Optional[int], sequential: bool, start_from: int) -> Dict:
         """Start a new download session"""
         try:
             # Get playlist info and tracks
@@ -209,10 +219,32 @@ class SpotifyDownloader:
             if not tracks:
                 return {"success": False, "error": "No tracks found in playlist"}
             
+            # Apply start_from offset (convert from 1-based to 0-based index)
+            start_index = max(0, start_from - 1)
+            if start_index >= len(tracks):
+                return {"success": False, "error": f"Start position {start_from} is beyond playlist length ({len(tracks)} tracks)"}
+            
+            original_track_count = len(tracks)
+            tracks = tracks[start_index:]
+            
+            if start_from > 1:
+                print(f"\n{Fore.YELLOW}Starting from track #{start_from} ({original_track_count - len(tracks)} tracks skipped){Style.RESET_ALL}")
+            
+            # Apply limit if specified
+            if limit and limit > 0:
+                tracks = tracks[:limit]
+                print(f"{Fore.YELLOW}Limiting to {limit} tracks{Style.RESET_ALL}")
+            
             # Display playlist info
             print(f"\n{Fore.CYAN}Playlist: {playlist_info['name']}{Style.RESET_ALL}")
             print(f"{Fore.CYAN}Owner: {playlist_info['owner']}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Tracks: {len(tracks)}{Style.RESET_ALL}")
+            if start_from > 1 or (limit and limit > 0):
+                print(f"{Fore.CYAN}Processing tracks {start_from}-{start_from + len(tracks) - 1} of {original_track_count} total{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.CYAN}Tracks: {len(tracks)}{Style.RESET_ALL}")
+            
+            # Set playlist name for file organization
+            self.file_manager.set_playlist_name(playlist_info['name'])
             
             if dry_run:
                 return self._dry_run_report(tracks)
@@ -227,12 +259,12 @@ class SpotifyDownloader:
             )
             
             # Process tracks
-            return await self._process_tracks(tracks, batch_size or self.config.batch_size)
+            return await self._process_tracks(tracks, batch_size or self.config.batch_size, sequential)
             
         except Exception as e:
             return {"success": False, "error": str(e)}
     
-    async def _resume_session(self, dry_run: bool, batch_size: Optional[int]) -> Dict:
+    async def _resume_session(self, dry_run: bool, batch_size: Optional[int], limit: Optional[int], sequential: bool, start_from: int) -> Dict:
         """Resume an existing session"""
         session = self.progress_tracker.load_session()
         if not session:
@@ -245,6 +277,11 @@ class SpotifyDownloader:
         retryable_tracks = self.progress_tracker.get_retryable_tracks()
         
         all_processable = pending_tracks + retryable_tracks
+        
+        # Apply limit if specified
+        if limit and limit > 0:
+            all_processable = all_processable[:limit]
+            print(f"\n{Fore.YELLOW}Limiting to first {limit} tracks{Style.RESET_ALL}")
         
         if not all_processable:
             print(f"{Fore.GREEN}Session already completed!{Style.RESET_ALL}")
@@ -287,7 +324,7 @@ class SpotifyDownloader:
             )
             tracks_to_process.append(track)
         
-        return await self._process_tracks(tracks_to_process, batch_size or self.config.batch_size)
+        return await self._process_tracks(tracks_to_process, batch_size or self.config.batch_size, sequential)
     
     def _dry_run_report(self, tracks: List[Track]) -> Dict:
         """Generate dry run report"""
@@ -321,7 +358,7 @@ class SpotifyDownloader:
         response = input(f"\n{Fore.CYAN}Continue? (yes/no): {Style.RESET_ALL}")
         return response.lower() in ['yes', 'y']
     
-    async def _process_tracks(self, tracks: List[Track], batch_size: int) -> Dict:
+    async def _process_tracks(self, tracks: List[Track], batch_size: int, sequential: bool = False) -> Dict:
         """Process tracks in batches"""
         total_tracks = len(tracks)
         successful = 0
@@ -338,37 +375,112 @@ class SpotifyDownloader:
             
             print(f"\n{Fore.CYAN}Processing batch {batch_num}/{total_batches} ({batch_start + 1}-{batch_end} of {total_tracks}){Style.RESET_ALL}")
             
-            # Send tracks to bot
-            for i, track in enumerate(batch):
-                global_index = batch_start + i + 1
+            if sequential:
+                # Process tracks one by one for cleaner progress display
+                for i, track in enumerate(batch):
+                    global_index = batch_start + i + 1
+                    
+                    # Skip if already completed
+                    if self._is_track_completed(track.id):
+                        print(f"{Fore.YELLOW}[{global_index}/{total_tracks}] Already completed, skipping{Style.RESET_ALL}")
+                        successful += 1
+                        continue
+                    
+                    print(f"\n{Fore.CYAN}[{global_index}/{total_tracks}] Processing: {track.artist_string} - {track.name}{Style.RESET_ALL}")
+                    
+                    # Send to bot
+                    if await self.telegram.send_track_to_bot(track):
+                        self.progress_tracker.mark_track_sent(track.id)
+                        if self.on_track_sent:
+                            await self.on_track_sent(track, global_index, total_tracks)
+                        
+                        # Wait for this specific track to complete before moving to next
+                        print(f"{Fore.YELLOW}Waiting for track to complete...{Style.RESET_ALL}")
+                        await self._wait_for_track_completion(track.id, timeout=300)
+                        
+                        # Check if it completed successfully
+                        if self._is_track_completed(track.id):
+                            successful += 1
+                            print(f"{Fore.GREEN}✓ Track completed successfully{Style.RESET_ALL}")
+                        else:
+                            failed += 1
+                            print(f"{Fore.RED}✗ Track failed or timed out{Style.RESET_ALL}")
+                    else:
+                        failed += 1
+                        self.progress_tracker.mark_track_failed(track.id, "Failed to send to bot")
+                        if self.on_track_failed:
+                            await self.on_track_failed(track, "Failed to send to bot")
+            else:
+                # Process tracks in parallel (original behavior)
+                for i, track in enumerate(batch):
+                    global_index = batch_start + i + 1
+                    
+                    # Skip if already completed
+                    if self._is_track_completed(track.id):
+                        print(f"{Fore.YELLOW}[{global_index}/{total_tracks}] Already completed, skipping{Style.RESET_ALL}")
+                        successful += 1
+                        continue
+                    
+                    print(f"\n{Fore.CYAN}[{global_index}/{total_tracks}] Sending: {track.artist_string} - {track.name}{Style.RESET_ALL}")
+                    
+                    # Send to bot
+                    if await self.telegram.send_track_to_bot(track):
+                        self.progress_tracker.mark_track_sent(track.id)
+                        if self.on_track_sent:
+                            await self.on_track_sent(track, global_index, total_tracks)
+                    else:
+                        failed += 1
+                        self.progress_tracker.mark_track_failed(track.id, "Failed to send to bot")
+                        if self.on_track_failed:
+                            await self.on_track_failed(track, "Failed to send to bot")
                 
-                # Skip if already completed
-                if self._is_track_completed(track.id):
-                    print(f"{Fore.YELLOW}[{global_index}/{total_tracks}] Already completed, skipping{Style.RESET_ALL}")
-                    successful += 1
-                    continue
-                
-                print(f"\n{Fore.CYAN}[{global_index}/{total_tracks}] Sending: {track.artist_string} - {track.name}{Style.RESET_ALL}")
-                
-                # Send to bot
-                if await self.telegram.send_track_to_bot(track):
-                    self.progress_tracker.mark_track_sent(track.id)
-                    if self.on_track_sent:
-                        await self.on_track_sent(track, global_index, total_tracks)
-                else:
-                    failed += 1
-                    self.progress_tracker.mark_track_failed(track.id, "Failed to send to bot")
-                    if self.on_track_failed:
-                        await self.on_track_failed(track, "Failed to send to bot")
-            
-            # Wait for responses from this batch
-            if batch_end < total_tracks:
-                print(f"{Fore.YELLOW}Waiting for bot responses before next batch...{Style.RESET_ALL}")
-                await self.telegram.wait_for_responses(30)
+                # Wait for ALL tracks in this batch to complete before next batch
+                if batch_end < total_tracks:
+                    print(f"{Fore.YELLOW}Waiting for batch to complete before processing next batch...{Style.RESET_ALL}")
+                    await self._wait_for_batch_completion(batch, timeout=600)  # 10 minutes for batch
         
-        # Wait for final responses
+        # Wait for final responses and downloads to complete
         print(f"\n{Fore.YELLOW}Waiting for remaining bot responses...{Style.RESET_ALL}")
-        await self.telegram.wait_for_responses(60)
+        
+        # Wait longer and check for downloads more frequently
+        total_wait_time = 0
+        max_wait_time = 300  # 5 minutes total
+        
+        while total_wait_time < max_wait_time:
+            # Wait for responses
+            pending_responses = self.telegram.get_pending_count()
+            
+            # Check for incomplete tracks (sent_to_bot, downloading, etc.)
+            session = self.progress_tracker.current_session
+            incomplete_tracks = []
+            if session:
+                incomplete_tracks = [
+                    track for track in session.tracks.values() 
+                    if track.status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]
+                ]
+            
+            if pending_responses == 0 and len(incomplete_tracks) == 0:
+                print(f"{Fore.GREEN}All responses and downloads completed{Style.RESET_ALL}")
+                break
+            
+            if pending_responses > 0:
+                print(f"{Fore.YELLOW}Waiting for {pending_responses} pending responses...{Style.RESET_ALL}")
+            
+            if len(incomplete_tracks) > 0:
+                # Show what we're waiting for
+                waiting_for_bot = len([t for t in incomplete_tracks if t.status == TrackStatus.SENT_TO_BOT])
+                downloading = len([t for t in incomplete_tracks if t.status == TrackStatus.DOWNLOADING])
+                
+                if waiting_for_bot > 0:
+                    print(f"{Fore.YELLOW}Waiting for {waiting_for_bot} bot responses...{Style.RESET_ALL}")
+                if downloading > 0:
+                    print(f"{Fore.YELLOW}Waiting for {downloading} downloads to complete...{Style.RESET_ALL}")
+            
+            await asyncio.sleep(5)
+            total_wait_time += 5
+        
+        if total_wait_time >= max_wait_time:
+            print(f"{Fore.RED}Timeout reached after {max_wait_time} seconds{Style.RESET_ALL}")
         
         # Complete session
         self.progress_tracker.complete_session()
@@ -387,11 +499,83 @@ class SpotifyDownloader:
         
         return session.tracks[track_id].status == TrackStatus.COMPLETED
     
+    async def _wait_for_track_completion(self, track_id: str, timeout: int = 300):
+        """Wait for a specific track to complete"""
+        start_time = time.time()
+        
+        while (time.time() - start_time) < timeout:
+            session = self.progress_tracker.current_session
+            if not session or track_id not in session.tracks:
+                break
+            
+            track_status = session.tracks[track_id].status
+            
+            # Check if track is completed or failed
+            if track_status in [TrackStatus.COMPLETED, TrackStatus.FAILED]:
+                break
+            
+            await asyncio.sleep(2)  # Check every 2 seconds
+        
+        return self._is_track_completed(track_id)
+    
+    async def _wait_for_batch_completion(self, batch_tracks: List[Track], timeout: int = 600):
+        """Wait for all tracks in a batch to complete (success, fail, or not found)"""
+        start_time = time.time()
+        batch_track_ids = [track.id for track in batch_tracks]
+        
+        while (time.time() - start_time) < timeout:
+            session = self.progress_tracker.current_session
+            if not session:
+                break
+            
+            # Check status of all tracks in this batch
+            incomplete_tracks = []
+            for track_id in batch_track_ids:
+                if track_id in session.tracks:
+                    track_status = session.tracks[track_id].status
+                    # Track is incomplete if it's still being processed
+                    if track_status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]:
+                        incomplete_tracks.append(track_id)
+            
+            if not incomplete_tracks:
+                print(f"{Fore.GREEN}✓ Batch completed - all tracks processed{Style.RESET_ALL}")
+                break
+            
+            # Show progress
+            completed_count = len(batch_track_ids) - len(incomplete_tracks)
+            print(f"{Fore.YELLOW}Batch progress: {completed_count}/{len(batch_track_ids)} tracks completed{Style.RESET_ALL}")
+            
+            await asyncio.sleep(5)  # Check every 5 seconds
+        
+        # Final status check
+        session = self.progress_tracker.current_session
+        if session:
+            final_incomplete = []
+            for track_id in batch_track_ids:
+                if track_id in session.tracks:
+                    track_status = session.tracks[track_id].status
+                    if track_status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]:
+                        final_incomplete.append(track_id)
+            
+            if final_incomplete:
+                print(f"{Fore.RED}Warning: {len(final_incomplete)} tracks in batch did not complete within timeout{Style.RESET_ALL}")
+                # Mark them as failed due to timeout
+                for track_id in final_incomplete:
+                    self.progress_tracker.mark_track_failed(track_id, "Batch timeout")
+    
+    
     async def _handle_file_downloaded(self, message, filename: str, track: Track, track_name: str):
         """Handle file downloaded from Telegram"""
         print(f"{Fore.CYAN}Processing downloaded file: {filename}{Style.RESET_ALL}")
         
+        if self.debug_mode:
+            print(f"{Fore.MAGENTA}DEBUG: Marking track {track.id} as downloading{Style.RESET_ALL}")
+        
+        # Update progress immediately
         self.progress_tracker.mark_track_downloading(track.id)
+        
+        if self.debug_mode:
+            print(f"{Fore.MAGENTA}DEBUG: Track marked as downloading{Style.RESET_ALL}")
         
         try:
             # Generate organized file path
@@ -401,7 +585,12 @@ class SpotifyDownloader:
             temp_path = Path(self.config.download_folder) / "temp" / filename
             temp_path.parent.mkdir(exist_ok=True, parents=True)
             
-            if await self.telegram.download_file(message, temp_path):
+            download_success = await self.telegram.download_file(message, temp_path)
+            
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}DEBUG: Download success: {download_success}{Style.RESET_ALL}")
+            
+            if download_success:
                 # Move to organized location
                 result = self.file_manager.move_to_organized_location(temp_path, track, filename)
                 
@@ -411,21 +600,26 @@ class SpotifyDownloader:
                         str(result.filepath), 
                         result.file_size
                     )
-                    print(f"{Fore.GREEN}✓ Downloaded: {result.filepath.name}{Style.RESET_ALL}")
+                    print(f"{Fore.GREEN}✓ Downloaded: {result.filepath.name} ({result.file_size:,} bytes){Style.RESET_ALL}")
                     
                     if self.on_track_downloaded:
                         await self.on_track_downloaded(track, result.filepath)
                 else:
-                    self.progress_tracker.mark_track_failed(track.id, result.error_message)
+                    error_msg = result.error_message or "Failed to organize file"
+                    print(f"{Fore.RED}Failed to organize file: {error_msg}{Style.RESET_ALL}")
+                    self.progress_tracker.mark_track_failed(track.id, error_msg)
                     if self.on_track_failed:
-                        await self.on_track_failed(track, result.error_message)
+                        await self.on_track_failed(track, error_msg)
             else:
-                self.progress_tracker.mark_track_failed(track.id, "Failed to download from Telegram")
+                error_msg = "Failed to download from Telegram"
+                print(f"{Fore.RED}{error_msg}{Style.RESET_ALL}")
+                self.progress_tracker.mark_track_failed(track.id, error_msg)
                 if self.on_track_failed:
-                    await self.on_track_failed(track, "Failed to download from Telegram")
+                    await self.on_track_failed(track, error_msg)
                 
         except Exception as e:
             error_msg = f"Error processing download: {e}"
+            print(f"{Fore.RED}{error_msg}{Style.RESET_ALL}")
             self.progress_tracker.mark_track_failed(track.id, error_msg)
             if self.on_track_failed:
                 await self.on_track_failed(track, error_msg)
@@ -494,6 +688,12 @@ class SpotifyDownloader:
         self.on_track_sent = on_track_sent
         self.on_track_downloaded = on_track_downloaded  
         self.on_track_failed = on_track_failed
+    
+    def set_debug_mode(self, enabled: bool):
+        """Enable or disable debug logging"""
+        self.debug_mode = enabled
+        if self.telegram:
+            self.telegram.debug_mode = enabled
 
 
 async def create_downloader(config: Optional[DownloadConfig] = None) -> SpotifyDownloader:

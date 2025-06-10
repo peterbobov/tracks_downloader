@@ -226,36 +226,51 @@ Settings → Privacy → Active Sessions
 ### Practical Security
 For local personal use, session security is equivalent to any authenticated desktop application. Main rule: treat `sessions/` folder like your `.ssh/` folder - keep it local and protected.
 
-## Quick Start Commands
+## Quick Start Commands (v2.1.0)
 
 ```bash
-# First run (with authentication)
-python telethon_downloader.py https://open.spotify.com/playlist/xxxxx
+# Setup virtual environment
+source .venv/bin/activate
 
-# Subsequent runs
-python telethon_downloader.py <playlist_url> --batch-size 10
+# Basic download
+python run.py "https://open.spotify.com/playlist/xxxxx"
 
-# Dry run to preview
-python telethon_downloader.py <playlist_url> --dry-run
+# Preview tracks without downloading
+python run.py "https://open.spotify.com/playlist/xxxxx" --dry-run
+
+# Test with single track
+python run.py "https://open.spotify.com/playlist/xxxxx" --limit 1
+
+# Sequential processing (cleaner progress)
+python run.py "https://open.spotify.com/playlist/xxxxx" --sequential
+
+# Chunked processing (recommended for large playlists)
+python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 1 --limit 15 --batch-size 5
+python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 16 --limit 15 --batch-size 5
+
+# Debug mode for troubleshooting
+python run.py "https://open.spotify.com/playlist/xxxxx" --debug
 
 # Check progress
-python telethon_downloader.py --status
+python run.py status
 
 # Reset progress
-python telethon_downloader.py --reset
+python run.py reset
 ```
 
-## Current Implementation Status (v2.0.1 - Modular Architecture)
+## Current Implementation Status (v2.1.0 - Interactive Bot Support)
 
 ✅ **Completed:**
-- **Modular Architecture**: Separated concerns into distinct modules
-- **Enhanced Spotify API**: Support for playlists, albums, and tracks with caching
-- **Advanced Telegram Client**: Secure session management with Telethon
-- **Smart File Management**: Organized downloads with duplicate detection
-- **Comprehensive Progress Tracking**: Resume capability and detailed reporting
-- **CLI Interface**: User-friendly command-line tool with multiple commands
-- **Rate Limiting**: Conservative approach to protect Telegram account
-- **Error Handling**: Robust retry logic and graceful failure handling
+- **Interactive Bot Support**: Full support for button-based bot interactions
+- **Automatic Button Clicking**: Intelligently selects first option from bot responses
+- **Enhanced Progress Tracking**: Fixed premature completion and lost track issues
+- **Playlist-Based Organization**: Files organized by playlist name with clean filenames
+- **Flexible Processing Modes**: Sequential vs parallel processing options
+- **Chunked Download Support**: Process large playlists in manageable segments
+- **True Batch Processing**: Waits for complete batch before proceeding
+- **Debug Mode**: Optional detailed logging for troubleshooting
+- **Improved File Management**: Better timeout handling and download verification
+- **Comprehensive CLI**: Advanced command-line options for all use cases
 
 📁 **Project Structure:**
 ```
@@ -377,7 +392,37 @@ RESPONSE_TIMEOUT=60
 5. **Performance**: Caching and optimized operations
 6. **Security**: Centralized credential management
 
-## Recent Updates (January 2025)
+## Recent Updates (June 2025)
+
+### v2.1.0 - Interactive Bot Support & Enhanced Features
+**Major update with full interactive bot support and advanced download control**
+
+#### ✅ **Interactive Bot Flow Implementation**
+- **Button Response Handling**: Automatically detects and clicks first option when bot provides track choices
+- **"Nothing Found" Detection**: Gracefully handles bot's image responses when tracks aren't available
+- **Sequential Flow Support**: Complete support for bot's interactive workflow (URL → Buttons → File)
+
+#### ✅ **Advanced Download Management**
+- **Progress Tracking Fixes**: Resolved issues where downloads would complete session prematurely
+- **Timeout Handling**: 5-minute timeouts for large file downloads (40-50MB FLAC files)
+- **Download Verification**: File size and existence validation before marking tracks complete
+- **Lost Track Prevention**: Fixed issue where tracks could get stuck in "sent_to_bot" status
+
+#### ✅ **Flexible Processing Options**
+- **Sequential Mode**: `--sequential` for one-track-at-a-time processing (cleaner progress display)
+- **Parallel Mode**: Default fast processing for large playlists
+- **Chunked Downloads**: `--start-from N` and `--limit N` for processing playlists in manageable chunks
+- **True Batch Processing**: Waits for entire batch completion before starting next batch
+
+#### ✅ **Enhanced File Organization**
+- **Playlist-Based Folders**: Files organized in folders named after playlist (e.g., "Vol rise/")
+- **Clean Filenames**: "Artist - Track Name.flac" format with filesystem-safe character handling
+- **Collision Prevention**: Smart handling of duplicate filenames
+
+#### ✅ **Debug & Monitoring Features**
+- **Debug Mode**: `--debug` flag for detailed logging when troubleshooting
+- **Real-time Progress**: Live updates on batch completion and download progress
+- **Comprehensive Reporting**: Detailed session statistics and file organization
 
 ### v2.0.1 - Security Fix & Dry Run Enhancement
 - **Security Incident**: Accidentally exposed Spotify credentials were removed
