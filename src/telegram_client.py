@@ -138,10 +138,14 @@ class TelegramMessenger:
     
     async def _handle_bot_response(self, event):
         """Handle responses from the bot"""
+        # Proactive cleanup of expired requests
+        self._cleanup_expired_requests()
+        
         if self.debug_mode:
+            pending_count = len(self.pending_responses)
             print(f"{Fore.MAGENTA}DEBUG: Received message type - Document: {bool(event.message.document)}, "
                   f"Buttons: {bool(event.message.buttons)}, Photo: {isinstance(event.message.media, MessageMediaPhoto)}, "
-                  f"Text: {bool(event.message.text)}{Style.RESET_ALL}")
+                  f"Text: {bool(event.message.text)}, Pending: {pending_count}{Style.RESET_ALL}")
         
         # Check if message has a document (file)
         if event.message.document:
@@ -201,13 +205,15 @@ class TelegramMessenger:
                 print(f"{Fore.GREEN}✓ Selected first option for: {track_name}{Style.RESET_ALL}")
                 
                 # Create new pending request for the file download with updated timestamp
+                # Use a unique key to avoid conflicts
+                new_key = f"file_{event.message.id}_{int(datetime.now().timestamp())}"
                 new_request = PendingRequest(
                     track=matched_request.track,
                     track_name=matched_request.track_name,
                     sent_at=datetime.now(),  # Reset timestamp for file download phase
                     message_id=event.message.id
                 )
-                self.pending_responses[event.message.id] = new_request
+                self.pending_responses[new_key] = new_request
                 
         except Exception as e:
             print(f"{Fore.RED}Error clicking button for {track_name}: {e}{Style.RESET_ALL}")
@@ -240,6 +246,8 @@ class TelegramMessenger:
         
         if not matched_request:
             print(f"{Fore.YELLOW}Received file but no matching request found{Style.RESET_ALL}")
+            # Clean up any orphaned pending responses that might match this file
+            self._cleanup_orphaned_requests()
             return
         
         track = matched_request.track
@@ -250,9 +258,6 @@ class TelegramMessenger:
         
         # Notify about file reception
         print(f"{Fore.CYAN}Received file for: {track_name}{Style.RESET_ALL}")
-        
-        # Remove from pending responses since we're handling it now
-        # (This prevents the FIFO queue from causing issues)
         
         # Handle the download directly
         if self.on_file_downloaded:
@@ -309,8 +314,9 @@ class TelegramMessenger:
                     track.url
                 )
                 
-                # Track pending response
-                self.pending_responses[message.id] = PendingRequest(
+                # Track pending response with unique key including track ID
+                request_key = f"msg_{message.id}_{track.id[:8]}"
+                self.pending_responses[request_key] = PendingRequest(
                     track=track,
                     track_name=track_name,
                     sent_at=datetime.now(),
@@ -424,16 +430,40 @@ class TelegramMessenger:
     def get_pending_count(self) -> int:
         """Get number of pending responses"""
         # Clean up expired requests first
+        self._cleanup_expired_requests()
+        return len(self.pending_responses)
+    
+    def _cleanup_expired_requests(self):
+        """Clean up expired pending requests"""
         cutoff_time = datetime.now() - timedelta(seconds=self.config.response_timeout)
         expired_ids = [
             msg_id for msg_id, request in self.pending_responses.items()
             if request.sent_at <= cutoff_time
         ]
         
+        if expired_ids and self.debug_mode:
+            print(f"{Fore.YELLOW}Cleaning up {len(expired_ids)} expired requests{Style.RESET_ALL}")
+        
         for msg_id in expired_ids:
             del self.pending_responses[msg_id]
-        
-        return len(self.pending_responses)
+    
+    def _cleanup_orphaned_requests(self):
+        """Clean up orphaned requests that might be causing issues"""
+        if len(self.pending_responses) > 20:  # If we have too many pending
+            # Keep only the most recent 10 requests
+            sorted_requests = sorted(
+                self.pending_responses.items(), 
+                key=lambda x: x[1].sent_at, 
+                reverse=True
+            )
+            
+            # Clear all and keep only recent ones
+            self.pending_responses.clear()
+            for msg_id, request in sorted_requests[:10]:
+                self.pending_responses[msg_id] = request
+            
+            if self.debug_mode:
+                print(f"{Fore.YELLOW}Cleaned up orphaned requests, keeping 10 most recent{Style.RESET_ALL}")
     
     def set_callbacks(self, 
                      on_file_downloaded: Optional[Callable] = None,

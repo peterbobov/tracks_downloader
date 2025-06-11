@@ -258,11 +258,13 @@ python run.py status
 python run.py reset
 ```
 
-## Current Implementation Status (v2.1.1 - Production Ready)
+## Current Implementation Status (v2.1.2 - Stable & Reliable)
 
-✅ **Production Ready Features:**
+✅ **Stable & Reliable Features:**
 - **@LosslessRobot Integration**: Fully optimized for [@LosslessRobot](https://t.me/LosslessRobot) Telegram bot
+- **Memory Leak Fixed**: Resolved critical issue causing hangs after ~35 tracks
 - **Interactive Bot Support**: Complete button-based bot interaction workflow
+- **Request Management**: Proactive cleanup prevents pending request accumulation
 - **Security Hardened**: Protected against credential exposure with proper .gitignore
 - **Large File Downloads**: Successfully handles 40-50MB FLAC files with 5-minute timeouts
 - **Automatic Button Clicking**: Intelligently selects first option from bot responses
@@ -271,8 +273,8 @@ python run.py reset
 - **Flexible Processing Modes**: Sequential vs parallel processing options
 - **Chunked Download Support**: Process large playlists in manageable segments
 - **True Batch Processing**: Waits for complete batch before proceeding
-- **Debug Mode**: Optional detailed logging for troubleshooting
-- **Production Testing**: Successfully tested with 101-track playlists
+- **Enhanced Debug Mode**: Shows pending request counts and cleanup operations
+- **Large Playlist Support**: Can now process full 90+ track playlists reliably
 - **Comprehensive CLI**: Advanced command-line options for all use cases
 
 📁 **Project Structure:**
@@ -396,6 +398,21 @@ RESPONSE_TIMEOUT=60
 6. **Security**: Centralized credential management
 
 ## Recent Updates (June 2025)
+
+### v2.1.2 - Critical Memory Leak Fix
+**Fixed critical memory leak causing downloads to stall after ~35 tracks**
+
+#### 🐛 **Critical Bug Fixes**
+- **Memory Leak Resolution**: Fixed pending request accumulation that caused bot to hang after processing ~35 tracks
+- **Request Cleanup**: Implemented proper cleanup in `_handle_file_response` method that was missing despite comments
+- **Orphaned Request Management**: Added `_cleanup_orphaned_requests()` to prevent request queue overflow
+- **Proactive Cleanup**: Now cleans up expired requests on every bot response, not just when checking count
+
+#### 🔧 **Enhanced Request Management**
+- **Better Request Keys**: Changed from simple message IDs to unique keys (`msg_{id}_{track_id}`) to prevent conflicts
+- **Debug Monitoring**: Enhanced debug mode to show pending request counts and cleanup operations
+- **Safeguard Limits**: Automatic cleanup when pending requests exceed 20 (keeps 10 most recent)
+- **Improved Stability**: Prevents indefinite hanging on large playlists by maintaining clean request queue
 
 ### v2.1.1 - Security Hardening & Production Readiness
 **Critical security fixes and production-ready release for [@LosslessRobot](https://t.me/LosslessRobot)**
