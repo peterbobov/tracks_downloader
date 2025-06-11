@@ -13,8 +13,10 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, AsyncGenerator, Callable
+from typing import Dict, Optional, AsyncGenerator, Callable, Tuple
 from dataclasses import dataclass
+
+from fuzzywuzzy import fuzz
 
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
@@ -241,11 +243,14 @@ class TelegramMessenger:
     
     async def _handle_file_response(self, event):
         """Handle file responses from bot"""
-        # Find matching pending request
-        matched_request = self._find_matching_request()
+        # Extract filename and metadata for smart matching
+        filename, metadata = self._extract_filename_and_metadata(event.message.document, "unknown")
+        
+        # Find matching pending request using smart content-based matching
+        matched_request = self._find_best_matching_request(filename, metadata)
         
         if not matched_request:
-            print(f"{Fore.YELLOW}Received file but no matching request found{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Received file '{filename}' but no matching request found{Style.RESET_ALL}")
             # Clean up any orphaned pending responses that might match this file
             self._cleanup_orphaned_requests()
             return
@@ -253,11 +258,8 @@ class TelegramMessenger:
         track = matched_request.track
         track_name = matched_request.track_name
         
-        # Determine filename
-        filename = self._extract_filename(event.message.document, track_name)
-        
-        # Notify about file reception
-        print(f"{Fore.CYAN}Received file for: {track_name}{Style.RESET_ALL}")
+        # Notify about file reception with smart match info
+        print(f"{Fore.CYAN}Received file for: {track_name} → {filename}{Style.RESET_ALL}")
         
         # Handle the download directly
         if self.on_file_downloaded:
@@ -286,18 +288,131 @@ class TelegramMessenger:
         
         return None
     
+    def _calculate_track_similarity(self, bot_filename: str, bot_metadata: Dict, spotify_artist: str, spotify_title: str) -> float:
+        """Calculate similarity score between bot response and Spotify track"""
+        scores = []
+        
+        # Clean up text for better matching
+        def clean_text(text):
+            return text.lower().replace('feat.', 'featuring').replace('&', 'and').strip()
+        
+        spotify_artist_clean = clean_text(spotify_artist)
+        spotify_title_clean = clean_text(spotify_title)
+        spotify_full = f"{spotify_artist_clean} - {spotify_title_clean}"
+        
+        # Score 1: Filename vs full track name (most reliable)
+        if bot_filename:
+            bot_filename_clean = clean_text(bot_filename.replace('.flac', '').replace('.mp3', ''))
+            filename_score = fuzz.token_sort_ratio(bot_filename_clean, spotify_full)
+            scores.append(('filename', filename_score, 0.6))  # High weight for filename
+            
+            # Also try just the title part
+            title_score = fuzz.token_sort_ratio(bot_filename_clean, spotify_title_clean)
+            scores.append(('filename_title', title_score, 0.3))
+        
+        # Score 2: Audio metadata performer vs Spotify artist
+        if bot_metadata.get('performer'):
+            performer_clean = clean_text(bot_metadata['performer'])
+            performer_score = fuzz.token_sort_ratio(performer_clean, spotify_artist_clean)
+            scores.append(('performer', performer_score, 0.4))
+        
+        # Score 3: Audio metadata title vs Spotify title
+        if bot_metadata.get('title'):
+            title_clean = clean_text(bot_metadata['title'])
+            title_score = fuzz.token_sort_ratio(title_clean, spotify_title_clean)
+            scores.append(('title', title_score, 0.5))
+        
+        # Calculate weighted average
+        if not scores:
+            return 0.0
+        
+        total_weighted = sum(score * weight for _, score, weight in scores)
+        total_weight = sum(weight for _, _, weight in scores)
+        
+        return total_weighted / total_weight if total_weight > 0 else 0.0
+    
+    def _find_best_matching_request(self, bot_filename: str, bot_metadata: Dict) -> Optional[PendingRequest]:
+        """Find best matching request using content similarity"""
+        # Clean up expired requests first
+        self._cleanup_expired_requests()
+        
+        if not self.pending_responses:
+            return None
+        
+        best_match = None
+        best_score = 0.0
+        best_request_id = None
+        match_details = []
+        
+        # Score all pending requests
+        for request_id, request in self.pending_responses.items():
+            spotify_artist = request.track.artist_string
+            spotify_title = request.track.name
+            
+            score = self._calculate_track_similarity(
+                bot_filename, bot_metadata, 
+                spotify_artist, spotify_title
+            )
+            
+            match_details.append((request_id, score, f"{spotify_artist} - {spotify_title}"))
+            
+            if score > best_score:
+                best_score = score
+                best_match = request
+                best_request_id = request_id
+        
+        # Debug output
+        if self.debug_mode and match_details:
+            print(f"{Fore.MAGENTA}DEBUG: Smart matching for '{bot_filename}':{Style.RESET_ALL}")
+            for req_id, score, track_name in sorted(match_details, key=lambda x: x[1], reverse=True):
+                print(f"{Fore.MAGENTA}  {score:5.1f}% - {track_name}{Style.RESET_ALL}")
+            if best_match:
+                print(f"{Fore.MAGENTA}  → Best match: {best_score:.1f}% confidence{Style.RESET_ALL}")
+        
+        # Use smart match if confidence is high enough
+        confidence_threshold = 70.0
+        if best_score >= confidence_threshold and best_match:
+            if self.debug_mode:
+                print(f"{Fore.GREEN}✓ Smart match: {best_score:.1f}% confidence{Style.RESET_ALL}")
+            # Remove the matched request
+            del self.pending_responses[best_request_id]
+            return best_match
+        
+        # Fall back to FIFO if no good smart match
+        if self.debug_mode:
+            print(f"{Fore.YELLOW}→ Falling back to FIFO (best score: {best_score:.1f}%){Style.RESET_ALL}")
+        
+        return self._find_matching_request()
+    
     def _extract_filename(self, document, fallback_name: str) -> str:
         """Extract filename from document or generate fallback"""
-        # Try to get filename from document attributes
+        filename, _ = self._extract_filename_and_metadata(document, fallback_name)
+        return filename
+    
+    def _extract_filename_and_metadata(self, document, fallback_name: str) -> Tuple[str, Dict]:
+        """Extract filename and metadata from document for smart matching"""
+        filename = None
+        metadata = {}
+        
+        # Try to get filename and metadata from document attributes
         for attr in document.attributes:
             if isinstance(attr, DocumentAttributeFilename):
-                return attr.file_name
+                filename = attr.file_name
             elif isinstance(attr, DocumentAttributeAudio):
                 if hasattr(attr, 'title') and attr.title:
-                    return f"{attr.title}.flac"
+                    metadata['title'] = attr.title
+                    if not filename:
+                        filename = f"{attr.title}.flac"
+                if hasattr(attr, 'performer') and attr.performer:
+                    metadata['performer'] = attr.performer
+                if hasattr(attr, 'duration') and attr.duration:
+                    metadata['duration'] = attr.duration
         
-        # Fallback to track name
-        return f"{fallback_name}.flac"
+        # Fallback to track name if no filename found
+        if not filename:
+            filename = f"{fallback_name}.flac"
+        
+        return filename, metadata
     
     async def send_track_to_bot(self, track: Track) -> bool:
         """Send track URL to external bot with rate limiting"""

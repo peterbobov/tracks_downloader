@@ -5,3 +5,4 @@ python-dotenv==1.0.0
 colorama==0.4.6
 tqdm==4.66.1
 cryptg==0.4.0
+fuzzywuzzy==0.18.0

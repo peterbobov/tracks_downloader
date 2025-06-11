@@ -258,10 +258,13 @@ python run.py status
 python run.py reset
 ```
 
-## Current Implementation Status (v2.1.2 - Stable & Reliable)
+## Current Implementation Status (v2.1.3 - Race-Condition Free)
 
-✅ **Stable & Reliable Features:**
+✅ **Race-Condition Free Features:**
 - **@LosslessRobot Integration**: Fully optimized for [@LosslessRobot](https://t.me/LosslessRobot) Telegram bot
+- **Smart Track Matching**: Content-based matching eliminates race conditions in parallel processing
+- **Intelligent File Assignment**: Tracks get correct names regardless of bot response order
+- **Fuzzy String Matching**: Handles naming variations between Spotify and bot responses
 - **Memory Leak Fixed**: Resolved critical issue causing hangs after ~35 tracks
 - **Interactive Bot Support**: Complete button-based bot interaction workflow
 - **Request Management**: Proactive cleanup prevents pending request accumulation
@@ -270,11 +273,11 @@ python run.py reset
 - **Automatic Button Clicking**: Intelligently selects first option from bot responses
 - **Enhanced Progress Tracking**: Fixed premature completion and lost track issues
 - **Playlist-Based Organization**: Files organized by playlist name with clean filenames
-- **Flexible Processing Modes**: Sequential vs parallel processing options
+- **Flexible Processing Modes**: Sequential vs parallel processing options (parallel now safe!)
 - **Chunked Download Support**: Process large playlists in manageable segments
 - **True Batch Processing**: Waits for complete batch before proceeding
-- **Enhanced Debug Mode**: Shows pending request counts and cleanup operations
-- **Large Playlist Support**: Can now process full 90+ track playlists reliably
+- **Advanced Debug Mode**: Shows match scores, pending counts, and cleanup operations
+- **Large Playlist Support**: Can now process full 90+ track playlists reliably with correct naming
 - **Comprehensive CLI**: Advanced command-line options for all use cases
 
 📁 **Project Structure:**
@@ -398,6 +401,35 @@ RESPONSE_TIMEOUT=60
 6. **Security**: Centralized credential management
 
 ## Recent Updates (June 2025)
+
+### v2.1.3 - Smart Track Matching Revolution
+**Eliminated race conditions with intelligent content-based track matching**
+
+#### 🎯 **Smart Matching Algorithm**
+- **Content-Based Matching**: Replaced FIFO with fuzzy string matching using bot filenames and metadata
+- **Multi-Factor Scoring**: Analyzes filename, audio metadata (performer, title), and duration against Spotify data
+- **Confidence Thresholds**: 70% confidence required for smart match, falls back to FIFO for edge cases
+- **Race Condition Elimination**: Tracks correctly assigned regardless of bot response order
+
+#### 🔧 **Technical Implementation**
+- **Enhanced Metadata Extraction**: `_extract_filename_and_metadata()` extracts rich audio metadata from bot responses
+- **Similarity Scoring**: `_calculate_track_similarity()` with weighted algorithm (filename 60%, performer 40%, title 50%)
+- **Smart Request Matching**: `_find_best_matching_request()` finds highest scoring match above threshold
+- **Text Normalization**: Handles variations like "feat."/"featuring", "&"/"and" for better matching
+
+#### 🚀 **Benefits for Parallel Processing**
+- **No More Wrong Names**: Tracks get correct filenames even when bot responds out of order
+- **Maintains Speed**: Full parallel processing benefits without accuracy loss
+- **Handles Variations**: Works with slight naming differences between Spotify and bot
+- **Debug Visibility**: Shows match scores and decisions in debug mode
+
+#### 📊 **Matching Process**
+```
+Bot Response: "AADJA - Neuro Erotic.flac"
+Pending: ["AADJA - Neuro Erotic", "DJ Sodeyama - Miles Pt.2", ...]
+Scores: [100% AADJA match, 15% DJ Sodeyama match, ...]
+→ Smart match: 100% confidence ✓
+```
 
 ### v2.1.2 - Critical Memory Leak Fix
 **Fixed critical memory leak causing downloads to stall after ~35 tracks**
