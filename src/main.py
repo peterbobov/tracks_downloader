@@ -148,10 +148,17 @@ class SpotifyDownloader:
         # Debug mode
         self.debug_mode = False
         
+        # Progress tracking to avoid duplicates
+        self.last_batch_progress_message = ""
+        
         # Callbacks for progress reporting
         self.on_track_sent: Optional[Callable] = None
         self.on_track_downloaded: Optional[Callable] = None
         self.on_track_failed: Optional[Callable] = None
+    
+    def _clear_print(self, message: str):
+        """Print message after clearing any download progress line"""
+        print(f"\r{' ' * 80}\r{message}")
     
     async def initialize(self) -> bool:
         """Initialize all components"""
@@ -436,7 +443,7 @@ class SpotifyDownloader:
                 
                 # Wait for ALL tracks in this batch to complete before next batch
                 if batch_end < total_tracks:
-                    print(f"{Fore.YELLOW}Waiting for batch to complete before processing next batch...{Style.RESET_ALL}")
+                    self._clear_print(f"{Fore.YELLOW}Waiting for batch to complete before processing next batch...{Style.RESET_ALL}")
                     await self._wait_for_batch_completion(batch, timeout=600)  # 10 minutes for batch
         
         # Wait for final responses and downloads to complete
@@ -541,9 +548,13 @@ class SpotifyDownloader:
                 print(f"{Fore.GREEN}✓ Batch completed - all tracks processed{Style.RESET_ALL}")
                 break
             
-            # Show progress
+            # Show progress (only if different from last message)
             completed_count = len(batch_track_ids) - len(incomplete_tracks)
-            print(f"{Fore.YELLOW}Batch progress: {completed_count}/{len(batch_track_ids)} tracks completed{Style.RESET_ALL}")
+            progress_message = f"Batch progress: {completed_count}/{len(batch_track_ids)} tracks completed"
+            
+            if progress_message != self.last_batch_progress_message:
+                print(f"\r{' ' * 80}\r{Fore.YELLOW}{progress_message}{Style.RESET_ALL}")
+                self.last_batch_progress_message = progress_message
             
             await asyncio.sleep(5)  # Check every 5 seconds
         
@@ -559,6 +570,11 @@ class SpotifyDownloader:
             
             if final_incomplete:
                 print(f"{Fore.RED}Warning: {len(final_incomplete)} tracks in batch did not complete within timeout{Style.RESET_ALL}")
+                # Show which tracks are stuck and their status
+                for track_id in final_incomplete:
+                    if track_id in session.tracks:
+                        track_progress = session.tracks[track_id]
+                        print(f"{Fore.RED}  - Stuck track: {track_progress.track_name} (Status: {track_progress.status.value}){Style.RESET_ALL}")
                 # Mark them as failed due to timeout
                 for track_id in final_incomplete:
                     self.progress_tracker.mark_track_failed(track_id, "Batch timeout")
@@ -566,7 +582,7 @@ class SpotifyDownloader:
     
     async def _handle_file_downloaded(self, message, filename: str, track: Track, track_name: str):
         """Handle file downloaded from Telegram"""
-        print(f"{Fore.CYAN}Processing downloaded file: {filename}{Style.RESET_ALL}")
+        self._clear_print(f"{Fore.CYAN}Processing downloaded file: {filename}{Style.RESET_ALL}")
         
         if self.debug_mode:
             print(f"{Fore.MAGENTA}DEBUG: Marking track {track.id} as downloading{Style.RESET_ALL}")
@@ -600,7 +616,7 @@ class SpotifyDownloader:
                         str(result.filepath), 
                         result.file_size
                     )
-                    print(f"{Fore.GREEN}✓ Downloaded: {result.filepath.name} ({result.file_size:,} bytes){Style.RESET_ALL}")
+                    self._clear_print(f"{Fore.GREEN}✓ Downloaded: {result.filepath.name} ({result.file_size:,} bytes){Style.RESET_ALL}")
                     
                     if self.on_track_downloaded:
                         await self.on_track_downloaded(track, result.filepath)
@@ -626,7 +642,7 @@ class SpotifyDownloader:
     
     async def _handle_download_failed(self, track: Track, error_message: str):
         """Handle download failure"""
-        print(f"{Fore.RED}Download failed: {track.artist_string} - {track.name}{Style.RESET_ALL}")
+        self._clear_print(f"{Fore.RED}Download failed: {track.artist_string} - {track.name}{Style.RESET_ALL}")
         print(f"{Fore.RED}Error: {error_message}{Style.RESET_ALL}")
         
         self.progress_tracker.mark_track_failed(track.id, error_message)

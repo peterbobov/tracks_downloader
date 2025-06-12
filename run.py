@@ -65,6 +65,7 @@ def print_help():
 
 {Fore.CYAN}OPTIONS:{Style.RESET_ALL}
   --dry-run          Preview tracks without downloading
+  --check-missing    Check which tracks are missing from download folder
   --batch-size N     Process N tracks at a time (default: 10)
   --limit N          Limit to first N tracks (for testing)
   --start-from N     Start from track number N (1-based, default: 1)
@@ -96,6 +97,9 @@ def print_help():
 
   # Download tracks 16-30 (chunked processing)
   python run.py https://open.spotify.com/playlist/xxxxx --start-from 16 --limit 15
+  
+  # Check which tracks are missing from downloads
+  python run.py https://open.spotify.com/playlist/xxxxx --check-missing
 
   # Download to specific directory with year folders
   python run.py https://open.spotify.com/playlist/xxxxx --output-dir ./music --year-folders
@@ -148,6 +152,12 @@ def create_parser() -> argparse.ArgumentParser:
         '--dry-run',
         action='store_true',
         help='Preview tracks without sending messages'
+    )
+    
+    parser.add_argument(
+        '--check-missing',
+        action='store_true',
+        help='Check which tracks are missing from download folder'
     )
     
     parser.add_argument(
@@ -231,15 +241,18 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def handle_download(args, config: DownloadConfig) -> int:
+async def handle_download(args, config: DownloadConfig, url: str = None) -> int:
     """Handle download command"""
-    if not args.target or args.target in ['download']:
+    # Use provided URL or get from args
+    if not url:
+        url = args.target
+    
+    if not url or url in ['download']:
         print(f"{Fore.RED}Error: Playlist URL required for download{Style.RESET_ALL}")
         print(f"Usage: python run.py <playlist_url> [options]")
         return 1
     
     # Handle 'download <url>' format
-    url = args.target
     if args.target == 'download' and len(sys.argv) > 2:
         url = sys.argv[2]
     
@@ -247,6 +260,10 @@ async def handle_download(args, config: DownloadConfig) -> int:
         print(f"{Fore.RED}Error: Invalid Spotify URL{Style.RESET_ALL}")
         print(f"URL should start with: https://open.spotify.com/")
         return 1
+    
+    # Check if this is a check-missing request
+    if hasattr(args, 'check_missing') and args.check_missing:
+        return await handle_check_missing(url, config)
     
     try:
         # Update config based on arguments
@@ -380,6 +397,103 @@ async def handle_report(args, config: DownloadConfig) -> int:
         return 1
 
 
+async def handle_check_missing(url: str, config: DownloadConfig) -> int:
+    """Handle check-missing command"""
+    try:
+        from fuzzywuzzy import fuzz
+        from pathlib import Path
+        
+        # Create downloader (we only need Spotify API, not Telegram)
+        downloader = SpotifyDownloader(config)
+        
+        print(f"{Fore.CYAN}Fetching playlist tracks from Spotify...{Style.RESET_ALL}")
+        
+        # Extract tracks from Spotify
+        tracks = downloader.spotify.extract_tracks(url)
+        if not tracks:
+            print(f"{Fore.RED}Error: Could not extract tracks from URL{Style.RESET_ALL}")
+            return 1
+        
+        print(f"{Fore.GREEN}Found {len(tracks)} tracks in playlist{Style.RESET_ALL}")
+        
+        # Get download folder
+        download_folder = Path(config.download_folder)
+        if not download_folder.exists():
+            print(f"{Fore.RED}Error: Download folder does not exist: {download_folder}{Style.RESET_ALL}")
+            return 1
+        
+        # Get all .flac files in download folder (recursively)
+        existing_files = list(download_folder.rglob("*.flac"))
+        existing_filenames = [f.stem for f in existing_files]  # Without .flac extension
+        
+        print(f"{Fore.CYAN}Found {len(existing_files)} FLAC files in download folder{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Checking for missing tracks (90% similarity threshold)...{Style.RESET_ALL}\n")
+        
+        missing_tracks = []
+        found_tracks = []
+        
+        for i, track in enumerate(tracks, 1):
+            expected_filename = f"{track.artist_string} - {track.name}"
+            
+            # Find best match using fuzzy string matching
+            best_score = 0
+            best_match = None
+            
+            for existing_filename in existing_filenames:
+                score = fuzz.ratio(expected_filename.lower(), existing_filename.lower())
+                if score > best_score:
+                    best_score = score
+                    best_match = existing_filename
+            
+            # 90% confidence threshold
+            if best_score >= 90:
+                found_tracks.append({
+                    'position': i,
+                    'track': track,
+                    'expected': expected_filename,
+                    'found': best_match,
+                    'score': best_score
+                })
+            else:
+                missing_tracks.append({
+                    'position': i,
+                    'track': track,
+                    'expected': expected_filename,
+                    'best_match': best_match,
+                    'score': best_score
+                })
+        
+        # Display results
+        print(f"{Fore.GREEN}✓ FOUND TRACKS ({len(found_tracks)}/{len(tracks)}):{Style.RESET_ALL}")
+        for found in found_tracks[:5]:  # Show first 5 found tracks
+            print(f"  [{found['position']:3d}] {found['expected']} (match: {found['score']}%)")
+        if len(found_tracks) > 5:
+            print(f"  ... and {len(found_tracks) - 5} more found tracks")
+        
+        print(f"\n{Fore.RED}✗ MISSING TRACKS ({len(missing_tracks)}/{len(tracks)}):{Style.RESET_ALL}")
+        if missing_tracks:
+            for missing in missing_tracks:
+                best_info = f" (best match: {missing['best_match']} - {missing['score']}%)" if missing['best_match'] else ""
+                print(f"  [{missing['position']:3d}] {missing['expected']}{best_info}")
+        else:
+            print(f"  {Fore.GREEN}🎉 All tracks found!{Style.RESET_ALL}")
+        
+        print(f"\n{Fore.CYAN}SUMMARY:{Style.RESET_ALL}")
+        print(f"  Total tracks: {len(tracks)}")
+        print(f"  Found: {len(found_tracks)} ({len(found_tracks)/len(tracks)*100:.1f}%)")
+        print(f"  Missing: {len(missing_tracks)} ({len(missing_tracks)/len(tracks)*100:.1f}%)")
+        
+        return 0
+        
+    except ImportError:
+        print(f"{Fore.RED}Error: fuzzywuzzy library required for check-missing command{Style.RESET_ALL}")
+        print("Install it with: pip install fuzzywuzzy python-levenshtein")
+        return 1
+    except Exception as e:
+        print(f"{Fore.RED}Error checking missing tracks: {e}{Style.RESET_ALL}")
+        return 1
+
+
 def print_version():
     """Print version information"""
     print(f"{Fore.CYAN}Spotify Downloader v2.0.0{Style.RESET_ALL}")
@@ -426,8 +540,8 @@ async def main() -> int:
         print_help()
         return 0
     else:
-        # Assume it's a download URL
-        return await handle_download(args, config)
+        # Assume it's a download URL (first argument as URL)
+        return await handle_download(args, config, args.target)
 
 
 if __name__ == "__main__":

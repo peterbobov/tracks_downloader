@@ -78,6 +78,10 @@ class TelegramMessenger:
         self.on_download_failed: Optional[Callable] = None
         self.on_bot_response: Optional[Callable] = None
     
+    def _clear_print(self, message: str):
+        """Print message after clearing any download progress line"""
+        print(f"\r{' ' * 80}\r{message}")
+    
     async def initialize(self) -> bool:
         """Initialize and authenticate Telegram client"""
         print(f"{Fore.CYAN}Initializing secure Telegram client...{Style.RESET_ALL}")
@@ -191,7 +195,7 @@ class TelegramMessenger:
         track_name = matched_request.track_name
         
         # Log button options received
-        print(f"{Fore.CYAN}Bot found options for: {track_name}{Style.RESET_ALL}")
+        self._clear_print(f"{Fore.CYAN}Bot found options for: {track_name}{Style.RESET_ALL}")
         
         # Click the first button automatically
         try:
@@ -204,11 +208,11 @@ class TelegramMessenger:
                 
                 # Click the button to select track
                 await event.message.click(0)  # Click first button (index 0)
-                print(f"{Fore.GREEN}✓ Selected first option for: {track_name}{Style.RESET_ALL}")
+                self._clear_print(f"{Fore.GREEN}✓ Selected first option for: {track_name}{Style.RESET_ALL}")
                 
                 # Create new pending request for the file download with updated timestamp
-                # Use a unique key to avoid conflicts
-                new_key = f"file_{event.message.id}_{int(datetime.now().timestamp())}"
+                # Use consistent key format with track ID
+                new_key = f"msg_{event.message.id}_{matched_request.track.id[:8]}"
                 new_request = PendingRequest(
                     track=matched_request.track,
                     track_name=matched_request.track_name,
@@ -235,7 +239,7 @@ class TelegramMessenger:
         track_name = matched_request.track_name
         
         # Log that track was not found
-        print(f"{Fore.YELLOW}⚠ Track not available: {track_name}{Style.RESET_ALL}")
+        self._clear_print(f"{Fore.YELLOW}⚠ Track not available: {track_name}{Style.RESET_ALL}")
         
         # Notify about unavailable track
         if self.on_download_failed:
@@ -259,7 +263,7 @@ class TelegramMessenger:
         track_name = matched_request.track_name
         
         # Notify about file reception with smart match info
-        print(f"{Fore.CYAN}Received file for: {track_name} → {filename}{Style.RESET_ALL}")
+        self._clear_print(f"{Fore.CYAN}Received file for: {track_name} → {filename}{Style.RESET_ALL}")
         
         # Handle the download directly
         if self.on_file_downloaded:
@@ -438,7 +442,7 @@ class TelegramMessenger:
                     message_id=message.id
                 )
                 
-                print(f"{Fore.CYAN}Sent: {track_name}{Style.RESET_ALL}")
+                self._clear_print(f"{Fore.CYAN}Sent: {track_name}{Style.RESET_ALL}")
                 
                 # Rate limiting delay
                 await asyncio.sleep(self.config.delay_between_requests)
@@ -478,7 +482,7 @@ class TelegramMessenger:
             raise RuntimeError("Telegram client not initialized")
         
         try:
-            print(f"{Fore.CYAN}Downloading: {filepath.name}{Style.RESET_ALL}")
+            self._clear_print(f"{Fore.CYAN}Downloading: {filepath.name}{Style.RESET_ALL}")
             
             def default_progress(current, total):
                 if progress_callback:
@@ -510,7 +514,7 @@ class TelegramMessenger:
                 filepath.unlink()
                 return False
             
-            print(f"{Fore.GREEN}✓ Download complete: {file_size:,} bytes{Style.RESET_ALL}")
+            self._clear_print(f"{Fore.GREEN}✓ Download complete: {file_size:,} bytes{Style.RESET_ALL}")
             return True
             
         except asyncio.TimeoutError:
@@ -564,8 +568,8 @@ class TelegramMessenger:
     
     def _cleanup_orphaned_requests(self):
         """Clean up orphaned requests that might be causing issues"""
-        if len(self.pending_responses) > 20:  # If we have too many pending
-            # Keep only the most recent 10 requests
+        if len(self.pending_responses) > 50:  # If we have too many pending
+            # Keep only the most recent 30 requests
             sorted_requests = sorted(
                 self.pending_responses.items(), 
                 key=lambda x: x[1].sent_at, 
@@ -574,11 +578,11 @@ class TelegramMessenger:
             
             # Clear all and keep only recent ones
             self.pending_responses.clear()
-            for msg_id, request in sorted_requests[:10]:
+            for msg_id, request in sorted_requests[:30]:
                 self.pending_responses[msg_id] = request
             
             if self.debug_mode:
-                print(f"{Fore.YELLOW}Cleaned up orphaned requests, keeping 10 most recent{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}Cleaned up orphaned requests, keeping 30 most recent{Style.RESET_ALL}")
     
     def set_callbacks(self, 
                      on_file_downloaded: Optional[Callable] = None,

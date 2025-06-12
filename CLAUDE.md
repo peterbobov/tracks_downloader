@@ -226,7 +226,7 @@ Settings → Privacy → Active Sessions
 ### Practical Security
 For local personal use, session security is equivalent to any authenticated desktop application. Main rule: treat `sessions/` folder like your `.ssh/` folder - keep it local and protected.
 
-## Quick Start Commands (v2.1.0)
+## Quick Start Commands (v2.1.4)
 
 ```bash
 # Setup virtual environment
@@ -234,6 +234,9 @@ source .venv/bin/activate
 
 # Basic download
 python run.py "https://open.spotify.com/playlist/xxxxx"
+
+# Check which tracks are missing (NEW!)
+python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
 
 # Preview tracks without downloading
 python run.py "https://open.spotify.com/playlist/xxxxx" --dry-run
@@ -258,16 +261,20 @@ python run.py status
 python run.py reset
 ```
 
-## Current Implementation Status (v2.1.3 - Race-Condition Free)
+## Current Implementation Status (v2.1.4 - Enhanced UX & Missing Track Detection)
 
-✅ **Race-Condition Free Features:**
+✅ **Enhanced UX & Missing Track Detection Features:**
 - **@LosslessRobot Integration**: Fully optimized for [@LosslessRobot](https://t.me/LosslessRobot) Telegram bot
 - **Smart Track Matching**: Content-based matching eliminates race conditions in parallel processing
+- **Clean Terminal Output**: All system messages properly clear progress lines for clean display
+- **Missing Track Detection**: New `--check-missing` flag with 90% fuzzy matching and position numbers
+- **Duplicate Message Prevention**: Batch progress only shows when status actually changes
+- **Fixed Request Key Management**: Consistent key formats prevent delayed file orphaning
 - **Intelligent File Assignment**: Tracks get correct names regardless of bot response order
 - **Fuzzy String Matching**: Handles naming variations between Spotify and bot responses
 - **Memory Leak Fixed**: Resolved critical issue causing hangs after ~35 tracks
 - **Interactive Bot Support**: Complete button-based bot interaction workflow
-- **Request Management**: Proactive cleanup prevents pending request accumulation
+- **Request Management**: Enhanced queue limits (50→30) for better delayed file handling
 - **Security Hardened**: Protected against credential exposure with proper .gitignore
 - **Large File Downloads**: Successfully handles 40-50MB FLAC files with 5-minute timeouts
 - **Automatic Button Clicking**: Intelligently selects first option from bot responses
@@ -400,7 +407,44 @@ RESPONSE_TIMEOUT=60
 5. **Performance**: Caching and optimized operations
 6. **Security**: Centralized credential management
 
-## Recent Updates (June 2025)
+## Recent Updates (December 2025)
+
+### v2.1.4 - UI/UX Improvements & Missing Track Detection
+**Enhanced user experience with cleaner output and missing track detection**
+
+#### 🎨 **Clean Terminal Output**
+- **Progress Line Clearing**: All system messages now properly clear download progress lines before displaying
+- **Duplicate Message Prevention**: Batch progress messages no longer spam when status hasn't changed
+- **Consistent Formatting**: All status messages use consistent `_clear_print()` helper for clean display
+- **Improved Spacing**: Fixed messy overlapping text between progress indicators
+
+#### 🔍 **Missing Track Detection**
+- **New `--check-missing` Flag**: Check which tracks are missing from download folder using fuzzy matching
+- **90% Similarity Threshold**: Uses intelligent string matching to handle filename variations
+- **Position-Based Listing**: Shows playlist position numbers for easy identification of missing tracks
+- **Comprehensive Report**: Displays found vs missing tracks with detailed statistics and match confidence
+
+#### 🐛 **Critical Bug Fixes**
+- **Fixed Request Key Management**: Resolved inconsistent key formats (`msg_` vs `file_`) that caused delayed files to be orphaned
+- **Queue Size Optimization**: Increased pending request limits from 20→10 to 50→30 for better delayed file handling
+- **Consistent Key Format**: Button responses now maintain same key format throughout track lifecycle
+
+#### ✨ **Enhanced Features**
+```bash
+# Check missing tracks with new flag syntax
+python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
+
+# Clean progress output - no more messy overlapping text
+Progress: 12345/67890 bytes (18.2%)
+✓ Downloaded: Track Name.flac (45,123,456 bytes)
+Batch progress: 3/5 tracks completed
+```
+
+#### 🔧 **Technical Improvements**
+- **Unified Progress Display**: Both telegram_client.py and main.py use `_clear_print()` helper
+- **Smart Duplicate Prevention**: Tracks last batch progress message to avoid redundant output
+- **Better File Matching**: Recursive .flac file scanning with fuzzy string matching
+- **Robust Error Handling**: Graceful handling of missing download folders and library dependencies
 
 ### v2.1.3 - Smart Track Matching Revolution
 **Eliminated race conditions with intelligent content-based track matching**
