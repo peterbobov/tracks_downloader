@@ -470,6 +470,14 @@ class SpotifyDownloader:
                 print(f"{Fore.GREEN}All responses and downloads completed{Style.RESET_ALL}")
                 break
             
+            # If all tracks are in final states but we still have pending responses, clean them up
+            if len(incomplete_tracks) == 0 and pending_responses > 0:
+                if self.debug_mode:
+                    print(f"{Fore.MAGENTA}DEBUG: All tracks finished but {pending_responses} pending responses remain - cleaning up{Style.RESET_ALL}")
+                # Force cleanup of orphaned requests
+                self.telegram._cleanup_orphaned_requests()
+                pending_responses = self.telegram.get_pending_count()
+            
             if pending_responses > 0:
                 self._clear_print(f"{Fore.YELLOW}Waiting for {pending_responses} pending responses...{Style.RESET_ALL}")
             

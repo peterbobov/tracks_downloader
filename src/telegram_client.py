@@ -241,9 +241,17 @@ class TelegramMessenger:
         # Log that track was not found
         self._clear_print(f"{Fore.YELLOW}⚠ Track not available: {track_name}{Style.RESET_ALL}")
         
+        # Ensure the request is removed from pending responses
+        # (should already be done in _find_matching_request, but double-check)
+        if self.debug_mode:
+            print(f"{Fore.MAGENTA}DEBUG: Pending responses after nothing found: {len(self.pending_responses)}{Style.RESET_ALL}")
+        
         # Notify about unavailable track
         if self.on_download_failed:
             await self.on_download_failed(track, "Track not found by bot")
+        
+        # Clean up any orphaned requests after failure
+        self._cleanup_orphaned_requests()
     
     async def _handle_file_response(self, event):
         """Handle file responses from bot"""
