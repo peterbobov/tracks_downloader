@@ -232,7 +232,11 @@ class TelegramMessenger:
         matched_request = self._find_matching_request()
         
         if not matched_request:
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}DEBUG: Received image but no matching request found. Pending: {len(self.pending_responses)}{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}Received image but no matching request found{Style.RESET_ALL}")
+            # Try to clean up any orphaned requests
+            self._cleanup_orphaned_requests()
             return
         
         track = matched_request.track

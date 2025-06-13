@@ -453,6 +453,10 @@ class SpotifyDownloader:
         total_wait_time = 0
         max_wait_time = 300  # 5 minutes total
         
+        # For single track downloads, be more aggressive with timeout
+        if session and len(session.tracks) == 1:
+            max_wait_time = 30  # Only wait 30 seconds for single track
+        
         while total_wait_time < max_wait_time:
             # Wait for responses
             pending_responses = self.telegram.get_pending_count()
@@ -477,6 +481,13 @@ class SpotifyDownloader:
                 # Force cleanup of orphaned requests
                 self.telegram._cleanup_orphaned_requests()
                 pending_responses = self.telegram.get_pending_count()
+                
+                # If we still have pending responses after cleanup, force exit
+                if pending_responses > 0:
+                    if self.debug_mode:
+                        print(f"{Fore.MAGENTA}DEBUG: Still {pending_responses} pending after cleanup - force breaking{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}All tracks processed, ending session{Style.RESET_ALL}")
+                    break
             
             if pending_responses > 0:
                 self._clear_print(f"{Fore.YELLOW}Waiting for {pending_responses} pending responses...{Style.RESET_ALL}")
@@ -654,6 +665,10 @@ class SpotifyDownloader:
         print(f"{Fore.RED}Error: {error_message}{Style.RESET_ALL}")
         
         self.progress_tracker.mark_track_failed(track.id, error_message)
+        
+        # Clean up any orphaned pending requests when a track fails
+        if self.telegram:
+            self.telegram._cleanup_orphaned_requests()
         
         if self.on_track_failed:
             await self.on_track_failed(track, error_message)
