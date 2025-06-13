@@ -453,10 +453,10 @@ class SpotifyDownloader:
         total_wait_time = 0
         max_wait_time = 300  # 5 minutes total
         
-        # For single track downloads, be more aggressive with timeout
+        # For single track downloads, use shorter but reasonable timeout
         session = self.progress_tracker.current_session
         if session and len(session.tracks) == 1:
-            max_wait_time = 30  # Only wait 30 seconds for single track
+            max_wait_time = 120  # Wait 2 minutes for single track
         
         while total_wait_time < max_wait_time:
             # Wait for responses
