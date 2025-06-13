@@ -447,7 +447,7 @@ class SpotifyDownloader:
                     await self._wait_for_batch_completion(batch, timeout=600)  # 10 minutes for batch
         
         # Wait for final responses and downloads to complete
-        print(f"\n{Fore.YELLOW}Waiting for remaining bot responses...{Style.RESET_ALL}")
+        self._clear_print(f"{Fore.YELLOW}Waiting for remaining bot responses...{Style.RESET_ALL}")
         
         # Wait longer and check for downloads more frequently
         total_wait_time = 0
@@ -471,7 +471,7 @@ class SpotifyDownloader:
                 break
             
             if pending_responses > 0:
-                print(f"{Fore.YELLOW}Waiting for {pending_responses} pending responses...{Style.RESET_ALL}")
+                self._clear_print(f"{Fore.YELLOW}Waiting for {pending_responses} pending responses...{Style.RESET_ALL}")
             
             if len(incomplete_tracks) > 0:
                 # Show what we're waiting for
@@ -479,9 +479,9 @@ class SpotifyDownloader:
                 downloading = len([t for t in incomplete_tracks if t.status == TrackStatus.DOWNLOADING])
                 
                 if waiting_for_bot > 0:
-                    print(f"{Fore.YELLOW}Waiting for {waiting_for_bot} bot responses...{Style.RESET_ALL}")
+                    self._clear_print(f"{Fore.YELLOW}Waiting for {waiting_for_bot} bot responses...{Style.RESET_ALL}")
                 if downloading > 0:
-                    print(f"{Fore.YELLOW}Waiting for {downloading} downloads to complete...{Style.RESET_ALL}")
+                    self._clear_print(f"{Fore.YELLOW}Waiting for {downloading} downloads to complete...{Style.RESET_ALL}")
             
             await asyncio.sleep(5)
             total_wait_time += 5

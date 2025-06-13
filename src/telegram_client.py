@@ -604,7 +604,7 @@ class TelegramMessenger:
         start_time = time.time()
         
         while self.get_pending_count() > 0 and (time.time() - start_time) < timeout_seconds:
-            print(f"{Fore.YELLOW}Waiting for {self.get_pending_count()} pending responses...{Style.RESET_ALL}")
+            self._clear_print(f"{Fore.YELLOW}Waiting for {self.get_pending_count()} pending responses...{Style.RESET_ALL}")
             await asyncio.sleep(5)
         
         remaining = self.get_pending_count()
