@@ -356,7 +356,7 @@ async def handle_status(config: DownloadConfig) -> int:
 
 async def handle_reset(config: DownloadConfig) -> int:
     """Handle reset command"""
-    response = input(f"{Fore.YELLOW}This will delete all progress data. Continue? (yes/no): {Style.RESET_ALL}")
+    response = input(f"{Fore.YELLOW}This will delete all progress data and cached playlist data. Continue? (yes/no): {Style.RESET_ALL}")
     
     if response.lower() not in ['yes', 'y']:
         print("Reset cancelled.")
@@ -365,7 +365,16 @@ async def handle_reset(config: DownloadConfig) -> int:
     try:
         downloader = SpotifyDownloader(config)
         downloader.reset_progress()
-        print(f"{Fore.GREEN}Progress data reset successfully{Style.RESET_ALL}")
+        
+        # Also clear Spotify API cache
+        from pathlib import Path
+        import shutil
+        cache_dir = Path("./cache")
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+            print(f"{Fore.GREEN}Spotify cache cleared{Style.RESET_ALL}")
+        
+        print(f"{Fore.GREEN}Progress data and cache reset successfully{Style.RESET_ALL}")
         return 0
         
     except Exception as e:
