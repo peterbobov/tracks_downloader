@@ -450,7 +450,9 @@ class SpotifyDownloader:
                 # Wait for ALL tracks in this batch to complete before next batch
                 if batch_end < total_tracks:
                     self._clear_print(f"{Fore.YELLOW}Waiting for batch to complete before processing next batch...{Style.RESET_ALL}")
-                    await self._wait_for_batch_completion(batch, timeout=self.config.response_timeout)
+                    # Use shorter timeout for batches to prevent hanging (5 minutes max per batch)
+                    batch_timeout = min(300, self.config.response_timeout) 
+                    await self._wait_for_batch_completion(batch, timeout=batch_timeout)
         
         # Wait for final responses and downloads to complete
         self._clear_print(f"{Fore.YELLOW}Waiting for remaining bot responses...{Style.RESET_ALL}")
@@ -556,6 +558,9 @@ class SpotifyDownloader:
         start_time = time.time()
         batch_track_ids = [track.id for track in batch_tracks]
         
+        if self.debug_mode:
+            print(f"{Fore.MAGENTA}DEBUG: Waiting for batch with track IDs: {batch_track_ids}{Style.RESET_ALL}")
+        
         while (time.time() - start_time) < timeout:
             session = self.progress_tracker.current_session
             if not session:
@@ -563,12 +568,22 @@ class SpotifyDownloader:
             
             # Check status of all tracks in this batch
             incomplete_tracks = []
+            completed_statuses = []
+            
             for track_id in batch_track_ids:
                 if track_id in session.tracks:
                     track_status = session.tracks[track_id].status
+                    completed_statuses.append(track_status.value)
                     # Track is incomplete if it's still being processed
                     if track_status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]:
                         incomplete_tracks.append(track_id)
+                else:
+                    # Track not in session yet - still incomplete
+                    incomplete_tracks.append(track_id)
+                    completed_statuses.append("not_in_session")
+            
+            if self.debug_mode and len(incomplete_tracks) > 0:
+                print(f"{Fore.MAGENTA}DEBUG: Incomplete tracks: {incomplete_tracks}, Statuses: {completed_statuses}{Style.RESET_ALL}")
             
             if not incomplete_tracks:
                 print(f"{Fore.GREEN}✓ Batch completed - all tracks processed{Style.RESET_ALL}")
@@ -579,7 +594,7 @@ class SpotifyDownloader:
             progress_message = f"Batch progress: {completed_count}/{len(batch_track_ids)} tracks completed"
             
             if progress_message != self.last_batch_progress_message:
-                print(f"\r{' ' * 80}\r{Fore.YELLOW}{progress_message}{Style.RESET_ALL}")
+                self._clear_print(f"{Fore.YELLOW}{progress_message}{Style.RESET_ALL}")
                 self.last_batch_progress_message = progress_message
             
             await asyncio.sleep(5)  # Check every 5 seconds
@@ -593,17 +608,38 @@ class SpotifyDownloader:
                     track_status = session.tracks[track_id].status
                     if track_status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]:
                         final_incomplete.append(track_id)
+                else:
+                    # Track never made it to session - this is likely the issue
+                    final_incomplete.append(track_id)
             
             if final_incomplete:
-                print(f"{Fore.RED}Warning: {len(final_incomplete)} tracks in batch did not complete within timeout{Style.RESET_ALL}")
+                elapsed_time = time.time() - start_time
+                if elapsed_time >= timeout:
+                    print(f"{Fore.RED}Batch timeout after {elapsed_time:.0f}s: {len(final_incomplete)} tracks incomplete{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}Force completing batch: {len(final_incomplete)} tracks may still be processing{Style.RESET_ALL}")
+                
                 # Show which tracks are stuck and their status
                 for track_id in final_incomplete:
                     if track_id in session.tracks:
                         track_progress = session.tracks[track_id]
                         print(f"{Fore.RED}  - Stuck track: {track_progress.track_name} (Status: {track_progress.status.value}){Style.RESET_ALL}")
-                # Mark them as failed due to timeout
-                for track_id in final_incomplete:
-                    self.progress_tracker.mark_track_failed(track_id, "Batch timeout")
+                    else:
+                        # Find the track name from batch_tracks
+                        track_name = "Unknown"
+                        for track in batch_tracks:
+                            if track.id == track_id:
+                                track_name = f"{track.artist_string} - {track.name}"
+                                break
+                        print(f"{Fore.RED}  - Track not in session: {track_name}{Style.RESET_ALL}")
+                        # Create session entry and mark as failed
+                        self.progress_tracker.mark_track_failed(track_id, "Track not processed by session")
+                
+                # Mark session tracks as failed due to timeout only if we actually timed out
+                if elapsed_time >= timeout:
+                    for track_id in final_incomplete:
+                        if track_id in session.tracks:
+                            self.progress_tracker.mark_track_failed(track_id, "Batch timeout")
     
     
     async def _handle_file_downloaded(self, message, filename: str, track: Track, track_name: str):
