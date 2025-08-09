@@ -100,6 +100,12 @@ def print_help():
   
   # Check which tracks are missing from downloads
   python run.py https://open.spotify.com/playlist/xxxxx --check-missing
+  
+  # Download only missing tracks (with approval prompt)
+  python run.py https://open.spotify.com/playlist/xxxxx --download-missing
+  
+  # Catalog existing music library
+  python run.py --catalog-library --output-dir ./music
 
   # Download to specific directory with year folders
   python run.py https://open.spotify.com/playlist/xxxxx --output-dir ./music --year-folders
@@ -158,6 +164,18 @@ def create_parser() -> argparse.ArgumentParser:
         '--check-missing',
         action='store_true',
         help='Check which tracks are missing from download folder'
+    )
+    
+    parser.add_argument(
+        '--catalog-library',
+        action='store_true',
+        help='Scan music library and populate catalog database'
+    )
+    
+    parser.add_argument(
+        '--download-missing',
+        action='store_true',
+        help='Download only tracks that are missing from your library (with approval prompt)'
     )
     
     parser.add_argument(
@@ -264,6 +282,10 @@ async def handle_download(args, config: DownloadConfig, url: str = None) -> int:
     # Check if this is a check-missing request
     if hasattr(args, 'check_missing') and args.check_missing:
         return await handle_check_missing(url, config)
+    
+    # Check if this is a download-missing request
+    if hasattr(args, 'download_missing') and args.download_missing:
+        return await handle_download_missing(args, config, url)
     
     try:
         # Update config based on arguments
@@ -406,11 +428,287 @@ async def handle_report(args, config: DownloadConfig) -> int:
         return 1
 
 
-async def handle_check_missing(url: str, config: DownloadConfig) -> int:
-    """Handle check-missing command"""
+async def handle_catalog_library(args, config: DownloadConfig) -> int:
+    """Handle catalog-library command"""
+    try:
+        from pathlib import Path
+        
+        # Import catalog module
+        sys.path.insert(0, str(Path(__file__).parent / 'src'))
+        from src.catalog import create_catalog
+        
+        # Get library path from config
+        library_path = Path(config.music_library_path)
+        if not library_path.exists():
+            print(f"{Fore.RED}Error: Music library path does not exist: {library_path}{Style.RESET_ALL}")
+            return 1
+        
+        print(f"{Fore.CYAN}Scanning music library: {library_path}{Style.RESET_ALL}")
+        
+        # Create catalog
+        catalog = create_catalog()
+        
+        # Scan library
+        added_count, error_count = catalog.scan_library(library_path)
+        
+        print(f"\n{Fore.GREEN}Library catalog completed:{Style.RESET_ALL}")
+        print(f"  Added: {added_count} tracks")
+        print(f"  Errors: {error_count} files")
+        
+        # Show catalog stats
+        stats = catalog.get_stats()
+        print(f"\n{Fore.CYAN}Catalog Statistics:{Style.RESET_ALL}")
+        print(f"  Total tracks: {stats.total_tracks}")
+        print(f"  Total size: {stats.total_size_gb:.2f} GB")
+        print(f"  Unique artists: {stats.unique_artists}")
+        print(f"  Unique albums: {stats.unique_albums}")
+        print(f"  Playlists: {len(stats.playlists)}")
+        
+        if stats.playlists:
+            print(f"  Playlist sources: {', '.join(stats.playlists[:5])}")
+            if len(stats.playlists) > 5:
+                print(f"    ... and {len(stats.playlists) - 5} more")
+        
+        if stats.file_formats:
+            print(f"  File formats: {dict(stats.file_formats)}")
+        
+        return 0
+        
+    except ImportError as e:
+        print(f"{Fore.RED}Error: Missing required library for catalog functionality{Style.RESET_ALL}")
+        print(f"Install missing dependencies: pip install mutagen")
+        return 1
+    except Exception as e:
+        print(f"{Fore.RED}Error cataloging library: {e}{Style.RESET_ALL}")
+        return 1
+
+
+async def handle_download_missing(args, config: DownloadConfig, url: str) -> int:
+    """Handle download-missing command with verbose preview and user approval"""
     try:
         from fuzzywuzzy import fuzz
         from pathlib import Path
+        
+        # Import catalog module
+        sys.path.insert(0, str(Path(__file__).parent / 'src'))
+        from src.catalog import create_catalog
+        
+        print(f"{Fore.CYAN}🔍 Analyzing playlist to identify missing tracks...{Style.RESET_ALL}")
+        
+        # Create downloader (we need Spotify API to get tracks)
+        downloader = SpotifyDownloader(config)
+        
+        # Extract tracks from Spotify
+        tracks = downloader.spotify.extract_tracks(url)
+        if not tracks:
+            print(f"{Fore.RED}Error: Could not extract tracks from URL{Style.RESET_ALL}")
+            return 1
+        
+        # Get playlist info for playlist name
+        playlist_info = downloader.spotify.get_playlist_info(url)
+        playlist_name = playlist_info['name'] if playlist_info else None
+        
+        print(f"{Fore.GREEN}Found {len(tracks)} tracks in playlist{Style.RESET_ALL}")
+        if playlist_name:
+            print(f"{Fore.CYAN}Playlist: {playlist_name}{Style.RESET_ALL}")
+        
+        # Get music library folder
+        library_folder = Path(config.music_library_path)
+        if not library_folder.exists():
+            print(f"{Fore.RED}Error: Music library path does not exist: {library_folder}{Style.RESET_ALL}")
+            return 1
+        
+        # Create catalog for database queries
+        catalog = create_catalog()
+        
+        print(f"{Fore.YELLOW}Checking existing tracks...{Style.RESET_ALL}")
+        
+        missing_tracks = []
+        found_tracks = []
+        
+        # If playlist name is available, check specific playlist folder
+        playlist_folder = None
+        if playlist_name:
+            playlist_folder = library_folder / downloader.file_manager.sanitize_filename(playlist_name, 100)
+        
+        for i, track in enumerate(tracks, 1):
+            expected_filename = f"{track.artist_string} - {track.name}"
+            found = False
+            
+            # Check catalog database first
+            catalog_track = catalog.find_track(track.name, track.artist_string)
+            if catalog_track and Path(catalog_track.file_path).exists():
+                found = True
+                found_tracks.append(track)
+                continue
+            
+            # If not in catalog, check folder scanning with fuzzy matching
+            search_paths = [library_folder]
+            if playlist_folder and playlist_folder.exists():
+                search_paths.insert(0, playlist_folder)  # Check playlist folder first
+            
+            best_score = 0
+            
+            for search_path in search_paths:
+                # Get all audio files in this path
+                for ext in ['.flac', '.mp3', '.wav', '.m4a', '.ogg']:
+                    for file_path in search_path.rglob(f"*{ext}"):
+                        filename = file_path.stem  # Without extension
+                        score = fuzz.ratio(expected_filename.lower(), filename.lower())
+                        
+                        if score > best_score:
+                            best_score = score
+                        
+                        # If we find a very high match, consider it found
+                        if score >= 90:
+                            found = True
+                            break
+                    
+                    if found:
+                        break
+                
+                # If we found a good match in playlist folder, don't search library
+                if found and search_path == playlist_folder:
+                    break
+            
+            if found:
+                found_tracks.append(track)
+            else:
+                missing_tracks.append(track)
+        
+        # Show analysis results
+        print(f"\n{Fore.CYAN}📊 ANALYSIS RESULTS:{Style.RESET_ALL}")
+        print(f"  Total tracks in playlist: {len(tracks)}")
+        print(f"  Already in library: {len(found_tracks)} ({len(found_tracks)/len(tracks)*100:.1f}%)")
+        print(f"  Missing tracks: {len(missing_tracks)} ({len(missing_tracks)/len(tracks)*100:.1f}%)")
+        
+        if not missing_tracks:
+            print(f"\n{Fore.GREEN}🎉 All tracks are already in your library!{Style.RESET_ALL}")
+            return 0
+        
+        # Show verbose information about what will be downloaded
+        print(f"\n{Fore.YELLOW}📋 MISSING TRACKS TO DOWNLOAD:{Style.RESET_ALL}")
+        
+        # Show first 10 missing tracks with details
+        for i, track in enumerate(missing_tracks[:10], 1):
+            duration = f"{track.duration_ms // 60000}:{(track.duration_ms % 60000) // 1000:02d}" if track.duration_ms else "Unknown"
+            print(f"  {i:2d}. {Fore.WHITE}{track.artist_string} - {track.name}{Style.RESET_ALL}")
+            if track.album:
+                print(f"      Album: {track.album} | Duration: {duration}")
+            else:
+                print(f"      Duration: {duration}")
+        
+        if len(missing_tracks) > 10:
+            print(f"      ... and {len(missing_tracks) - 10} more tracks")
+        
+        # Show download details
+        print(f"\n{Fore.CYAN}📥 DOWNLOAD DETAILS:{Style.RESET_ALL}")
+        if playlist_name:
+            destination_folder = f"{config.music_library_path}/{playlist_name}/"
+            print(f"  Destination: {destination_folder}")
+        else:
+            print(f"  Destination: {config.music_library_path}/Unknown Playlist/")
+        
+        print(f"  File format: FLAC (high quality)")
+        print(f"  Batch size: {args.batch_size} tracks at a time")
+        print(f"  Processing mode: {'Sequential' if args.sequential else 'Parallel'}")
+        print(f"  Rate limiting: {config.delay_between_requests}s between requests")
+        
+        # Estimate download time
+        estimated_minutes = len(missing_tracks) * config.delay_between_requests / 60
+        if args.sequential:
+            estimated_minutes *= 1.5  # Sequential takes longer
+        
+        print(f"  Estimated time: ~{estimated_minutes:.0f} minutes")
+        
+        # Security warning
+        print(f"\n{Fore.YELLOW}⚠️  SECURITY NOTICE:{Style.RESET_ALL}")
+        print(f"  - Messages will be sent from your personal Telegram account")
+        print(f"  - Conservative rate limiting protects your account")
+        print(f"  - Progress will be saved and can be resumed if interrupted")
+        
+        # User approval prompt
+        print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        response = input(f"{Fore.CYAN}📥 Download {len(missing_tracks)} missing tracks? (yes/no): {Style.RESET_ALL}").strip().lower()
+        
+        if response not in ['yes', 'y']:
+            print(f"{Fore.YELLOW}Download cancelled by user{Style.RESET_ALL}")
+            return 0
+        
+        print(f"\n{Fore.GREEN}🚀 Starting download of missing tracks...{Style.RESET_ALL}")
+        
+        # Initialize downloader for actual download
+        if not await downloader.initialize():
+            return 1
+        
+        # Set debug mode if requested
+        if hasattr(args, 'debug') and args.debug:
+            downloader.set_debug_mode(True)
+        
+        # Set playlist name for file organization
+        if playlist_name:
+            downloader.file_manager.set_playlist_name(playlist_name)
+        
+        try:
+            # Create a custom session for missing tracks only
+            session_id = downloader.progress_tracker.start_session(
+                url, playlist_name or "Missing Tracks Download", missing_tracks
+            )
+            downloader.current_session_id = session_id
+            
+            # Process only the missing tracks
+            result = await downloader._process_tracks(
+                missing_tracks, 
+                args.batch_size, 
+                args.sequential
+            )
+            
+            if result['success']:
+                print(f"\n{Fore.GREEN}✅ Missing tracks download completed successfully!{Style.RESET_ALL}")
+                
+                # Show final summary
+                stats = result.get('stats', {})
+                if stats:
+                    print(f"\n{Fore.CYAN}📊 DOWNLOAD SUMMARY:{Style.RESET_ALL}")
+                    print(f"  Successfully downloaded: {stats.get('completed', 0)} tracks")
+                    print(f"  Failed: {stats.get('failed', 0)} tracks")
+                    print(f"  Total size: {stats.get('total_size_mb', 0)} MB")
+                
+                return 0
+            else:
+                print(f"\n{Fore.RED}❌ Download failed: {result.get('error', 'Unknown error')}{Style.RESET_ALL}")
+                return 1
+                
+        finally:
+            await downloader.cleanup()
+    
+    except ImportError as e:
+        missing_lib = "fuzzywuzzy" if "fuzz" in str(e) else "mutagen"
+        print(f"{Fore.RED}Error: {missing_lib} library required for download-missing command{Style.RESET_ALL}")
+        if missing_lib == "fuzzywuzzy":
+            print("Install it with: pip install fuzzywuzzy python-levenshtein")
+        else:
+            print("Install it with: pip install mutagen")
+        return 1
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}Download interrupted by user{Style.RESET_ALL}")
+        if 'downloader' in locals():
+            await downloader.cleanup()
+        return 130
+    except Exception as e:
+        print(f"{Fore.RED}Error in download-missing: {e}{Style.RESET_ALL}")
+        return 1
+
+
+async def handle_check_missing(url: str, config: DownloadConfig) -> int:
+    """Handle check-missing command using both catalog database and folder scanning"""
+    try:
+        from fuzzywuzzy import fuzz
+        from pathlib import Path
+        
+        # Import catalog module
+        sys.path.insert(0, str(Path(__file__).parent / 'src'))
+        from src.catalog import create_catalog
         
         # Create downloader (we only need Spotify API, not Telegram)
         downloader = SpotifyDownloader(config)
@@ -423,44 +721,111 @@ async def handle_check_missing(url: str, config: DownloadConfig) -> int:
             print(f"{Fore.RED}Error: Could not extract tracks from URL{Style.RESET_ALL}")
             return 1
         
-        print(f"{Fore.GREEN}Found {len(tracks)} tracks in playlist{Style.RESET_ALL}")
+        # Get playlist info for playlist name
+        playlist_info = downloader.spotify.get_playlist_info(url)
+        playlist_name = playlist_info['name'] if playlist_info else None
         
-        # Get download folder
-        download_folder = Path(config.download_folder)
-        if not download_folder.exists():
-            print(f"{Fore.RED}Error: Download folder does not exist: {download_folder}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}Found {len(tracks)} tracks in playlist{Style.RESET_ALL}")
+        if playlist_name:
+            print(f"{Fore.CYAN}Playlist: {playlist_name}{Style.RESET_ALL}")
+        
+        # Get music library folder
+        library_folder = Path(config.music_library_path)
+        if not library_folder.exists():
+            print(f"{Fore.RED}Error: Music library path does not exist: {library_folder}{Style.RESET_ALL}")
             return 1
         
-        # Get all .flac files in download folder (recursively)
-        existing_files = list(download_folder.rglob("*.flac"))
-        existing_filenames = [f.stem for f in existing_files]  # Without .flac extension
+        # Create catalog for database queries
+        catalog = create_catalog()
         
-        print(f"{Fore.CYAN}Found {len(existing_files)} FLAC files in download folder{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Checking for missing tracks (90% similarity threshold)...{Style.RESET_ALL}\n")
+        print(f"{Fore.YELLOW}Checking tracks using both catalog database and folder scanning...{Style.RESET_ALL}\n")
         
         missing_tracks = []
         found_tracks = []
+        found_in_catalog = []
+        found_in_folder = []
+        
+        # Prepare expected tracks list for catalog lookup
+        expected_tracks = [(track.name, track.artist_string) for track in tracks]
+        
+        # Check catalog database first
+        catalog_missing = catalog.get_missing_tracks(expected_tracks)
+        catalog_missing_set = set(catalog_missing)
+        
+        # If playlist name is available, also check specific playlist folder
+        playlist_folder = None
+        if playlist_name:
+            playlist_folder = library_folder / downloader.file_manager.sanitize_filename(playlist_name, 100)
         
         for i, track in enumerate(tracks, 1):
             expected_filename = f"{track.artist_string} - {track.name}"
+            track_tuple = (track.name, track.artist_string)
+            found_method = None
+            found_location = None
+            confidence = 0
             
-            # Find best match using fuzzy string matching
+            # Check catalog database first
+            catalog_track = catalog.find_track(track.name, track.artist_string)
+            if catalog_track and Path(catalog_track.file_path).exists():
+                found_method = "catalog"
+                found_location = catalog_track.file_path
+                confidence = 100  # Exact match in catalog
+                found_tracks.append({
+                    'position': i,
+                    'track': track,
+                    'expected': expected_filename,
+                    'found': Path(found_location).name,
+                    'method': found_method,
+                    'location': found_location,
+                    'score': confidence
+                })
+                found_in_catalog.append(catalog_track)
+                continue
+            
+            # If not in catalog, check folder scanning with fuzzy matching
+            search_paths = [library_folder]
+            if playlist_folder and playlist_folder.exists():
+                search_paths.insert(0, playlist_folder)  # Check playlist folder first
+            
             best_score = 0
             best_match = None
+            best_location = None
             
-            for existing_filename in existing_filenames:
-                score = fuzz.ratio(expected_filename.lower(), existing_filename.lower())
-                if score > best_score:
-                    best_score = score
-                    best_match = existing_filename
+            for search_path in search_paths:
+                # Get all audio files in this path
+                for ext in ['.flac', '.mp3', '.wav', '.m4a', '.ogg']:
+                    for file_path in search_path.rglob(f"*{ext}"):
+                        filename = file_path.stem  # Without extension
+                        score = fuzz.ratio(expected_filename.lower(), filename.lower())
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_match = filename
+                            best_location = str(file_path)
+                        
+                        # If we find a very high match in playlist folder, prefer it
+                        if score >= 95 and search_path == playlist_folder:
+                            break
+                
+                # If we found a good match in playlist folder, don't search library
+                if best_score >= 90 and search_path == playlist_folder:
+                    break
             
-            # 90% confidence threshold
+            # 90% confidence threshold for folder matching
             if best_score >= 90:
+                found_method = "folder"
                 found_tracks.append({
                     'position': i,
                     'track': track,
                     'expected': expected_filename,
                     'found': best_match,
+                    'method': found_method,
+                    'location': best_location,
+                    'score': best_score
+                })
+                found_in_folder.append({
+                    'track': track,
+                    'file_path': best_location,
                     'score': best_score
                 })
             else:
@@ -469,34 +834,59 @@ async def handle_check_missing(url: str, config: DownloadConfig) -> int:
                     'track': track,
                     'expected': expected_filename,
                     'best_match': best_match,
+                    'best_location': best_location,
                     'score': best_score
                 })
         
         # Display results
         print(f"{Fore.GREEN}✓ FOUND TRACKS ({len(found_tracks)}/{len(tracks)}):{Style.RESET_ALL}")
-        for found in found_tracks[:5]:  # Show first 5 found tracks
-            print(f"  [{found['position']:3d}] {found['expected']} (match: {found['score']}%)")
-        if len(found_tracks) > 5:
-            print(f"  ... and {len(found_tracks) - 5} more found tracks")
+        
+        if found_in_catalog:
+            print(f"\n{Fore.CYAN}  Found in catalog database ({len(found_in_catalog)}):{Style.RESET_ALL}")
+            for found in [f for f in found_tracks if f['method'] == 'catalog'][:3]:
+                print(f"    [{found['position']:3d}] {found['expected']} → {found['found']}")
+            if len(found_in_catalog) > 3:
+                print(f"    ... and {len(found_in_catalog) - 3} more in catalog")
+        
+        if found_in_folder:
+            print(f"\n{Fore.CYAN}  Found by folder scanning ({len(found_in_folder)}):{Style.RESET_ALL}")
+            for found in [f for f in found_tracks if f['method'] == 'folder'][:3]:
+                folder_name = Path(found['location']).parent.name
+                print(f"    [{found['position']:3d}] {found['expected']} → {found['found']} ({found['score']}%) in {folder_name}/")
+            if len(found_in_folder) > 3:
+                print(f"    ... and {len(found_in_folder) - 3} more by folder scan")
         
         print(f"\n{Fore.RED}✗ MISSING TRACKS ({len(missing_tracks)}/{len(tracks)}):{Style.RESET_ALL}")
         if missing_tracks:
-            for missing in missing_tracks:
-                best_info = f" (best match: {missing['best_match']} - {missing['score']}%)" if missing['best_match'] else ""
+            for missing in missing_tracks[:10]:  # Show first 10 missing tracks
+                best_info = f" (closest: {missing['best_match']} - {missing['score']}%)" if missing['best_match'] else ""
                 print(f"  [{missing['position']:3d}] {missing['expected']}{best_info}")
+            if len(missing_tracks) > 10:
+                print(f"  ... and {len(missing_tracks) - 10} more missing tracks")
         else:
             print(f"  {Fore.GREEN}🎉 All tracks found!{Style.RESET_ALL}")
         
         print(f"\n{Fore.CYAN}SUMMARY:{Style.RESET_ALL}")
         print(f"  Total tracks: {len(tracks)}")
-        print(f"  Found: {len(found_tracks)} ({len(found_tracks)/len(tracks)*100:.1f}%)")
+        print(f"  Found in catalog: {len(found_in_catalog)}")
+        print(f"  Found by folder scan: {len(found_in_folder)}")
+        print(f"  Total found: {len(found_tracks)} ({len(found_tracks)/len(tracks)*100:.1f}%)")
         print(f"  Missing: {len(missing_tracks)} ({len(missing_tracks)/len(tracks)*100:.1f}%)")
+        
+        # Suggest catalog update if many tracks found by folder scan
+        if len(found_in_folder) > 0:
+            print(f"\n{Fore.YELLOW}💡 Tip: {len(found_in_folder)} tracks were found by folder scanning but not in catalog.{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}   Run: python run.py --catalog-library to update your catalog database{Style.RESET_ALL}")
         
         return 0
         
-    except ImportError:
-        print(f"{Fore.RED}Error: fuzzywuzzy library required for check-missing command{Style.RESET_ALL}")
-        print("Install it with: pip install fuzzywuzzy python-levenshtein")
+    except ImportError as e:
+        missing_lib = "fuzzywuzzy" if "fuzz" in str(e) else "mutagen"
+        print(f"{Fore.RED}Error: {missing_lib} library required for check-missing command{Style.RESET_ALL}")
+        if missing_lib == "fuzzywuzzy":
+            print("Install it with: pip install fuzzywuzzy python-levenshtein")
+        else:
+            print("Install it with: pip install mutagen")
         return 1
     except Exception as e:
         print(f"{Fore.RED}Error checking missing tracks: {e}{Style.RESET_ALL}")
@@ -522,6 +912,17 @@ async def main() -> int:
     if args.version:
         print_version()
         return 0
+    
+    # Handle catalog-library command (doesn't require target)
+    if hasattr(args, 'catalog_library') and args.catalog_library:
+        # Load config for library path
+        try:
+            config = DownloadConfig.from_env(dry_run=True)  # Use dry_run config
+        except ValueError as e:
+            print(f"{Fore.RED}Configuration Error: {e}{Style.RESET_ALL}")
+            print("MUSIC_LIBRARY_PATH is required for catalog functionality")
+            return 1
+        return await handle_catalog_library(args, config)
     
     if not args.target:
         print_banner()

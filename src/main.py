@@ -43,11 +43,12 @@ class DownloadConfig:
     external_bot_username: str
     
     # Download settings
-    download_folder: str = "./downloads"
+    download_folder: str = "./downloads"  # Legacy parameter, kept for compatibility
+    music_library_path: str = "./music"  # Main music library path
     delay_between_requests: float = 3.0
     max_retries: int = 3
     batch_size: int = 10
-    response_timeout: int = 60
+    response_timeout: int = 600  # 10 minutes for large files
     
     # File organization
     organize_by_artist: bool = True
@@ -79,9 +80,10 @@ class DownloadConfig:
                 telegram_phone_number="+1234567890",  # Dummy value
                 external_bot_username="@dummy_bot",  # Dummy value
                 download_folder=os.getenv('DOWNLOAD_FOLDER', './downloads'),
+                music_library_path=os.getenv('MUSIC_LIBRARY_PATH', './music'),
                 delay_between_requests=float(os.getenv('DELAY_BETWEEN_REQUESTS', 3.0)),
                 max_retries=int(os.getenv('MAX_RETRIES', 3)),
-                response_timeout=int(os.getenv('RESPONSE_TIMEOUT', 60)),
+                response_timeout=int(os.getenv('RESPONSE_TIMEOUT', 600)),
             )
         
         # For actual download, all credentials are required
@@ -103,6 +105,7 @@ class DownloadConfig:
             telegram_phone_number=os.getenv('TELEGRAM_PHONE_NUMBER'),
             external_bot_username=os.getenv('EXTERNAL_BOT_USERNAME'),
             download_folder=os.getenv('DOWNLOAD_FOLDER', './downloads'),
+            music_library_path=os.getenv('MUSIC_LIBRARY_PATH', './music'),
             delay_between_requests=float(os.getenv('DELAY_BETWEEN_REQUESTS', 3.0)),
             max_retries=int(os.getenv('MAX_RETRIES', 3)),
             response_timeout=int(os.getenv('RESPONSE_TIMEOUT', 60)),
@@ -133,11 +136,14 @@ class SpotifyDownloader:
         )
         
         self.file_manager = create_file_manager(
-            download_folder=config.download_folder,
+            download_folder=config.music_library_path,  # Use music library path instead
             organize_by_artist=config.organize_by_artist,
             organize_by_album=config.organize_by_album,
             create_year_folders=config.create_year_folders
         )
+        
+        # Enable catalog integration
+        self.file_manager.enable_catalog()
         
         self.progress_tracker = create_progress_tracker(config.progress_file)
         
@@ -403,7 +409,7 @@ class SpotifyDownloader:
                         
                         # Wait for this specific track to complete before moving to next
                         print(f"{Fore.YELLOW}Waiting for track to complete...{Style.RESET_ALL}")
-                        await self._wait_for_track_completion(track.id, timeout=300)
+                        await self._wait_for_track_completion(track.id, timeout=self.config.response_timeout)
                         
                         # Check if it completed successfully
                         if self._is_track_completed(track.id):
@@ -444,19 +450,19 @@ class SpotifyDownloader:
                 # Wait for ALL tracks in this batch to complete before next batch
                 if batch_end < total_tracks:
                     self._clear_print(f"{Fore.YELLOW}Waiting for batch to complete before processing next batch...{Style.RESET_ALL}")
-                    await self._wait_for_batch_completion(batch, timeout=600)  # 10 minutes for batch
+                    await self._wait_for_batch_completion(batch, timeout=self.config.response_timeout)
         
         # Wait for final responses and downloads to complete
         self._clear_print(f"{Fore.YELLOW}Waiting for remaining bot responses...{Style.RESET_ALL}")
         
         # Wait longer and check for downloads more frequently
         total_wait_time = 0
-        max_wait_time = 300  # 5 minutes total
+        max_wait_time = self.config.response_timeout
         
         # For single track downloads, use shorter but reasonable timeout
         session = self.progress_tracker.current_session
         if session and len(session.tracks) == 1:
-            max_wait_time = 120  # Wait 2 minutes for single track
+            max_wait_time = max(self.config.response_timeout, 900)  # At least 15 minutes for single track
         
         while total_wait_time < max_wait_time:
             # Wait for responses
@@ -526,7 +532,7 @@ class SpotifyDownloader:
         
         return session.tracks[track_id].status == TrackStatus.COMPLETED
     
-    async def _wait_for_track_completion(self, track_id: str, timeout: int = 300):
+    async def _wait_for_track_completion(self, track_id: str, timeout: int = 600):
         """Wait for a specific track to complete"""
         start_time = time.time()
         

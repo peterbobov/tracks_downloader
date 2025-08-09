@@ -6,3 +6,5 @@ colorama==0.4.6
 tqdm==4.66.1
 cryptg==0.4.0
 fuzzywuzzy==0.18.0
+python-levenshtein==0.21.1
+mutagen==1.47.0

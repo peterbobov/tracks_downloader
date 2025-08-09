@@ -510,7 +510,7 @@ class TelegramMessenger:
                     file=str(filepath),
                     progress_callback=default_progress
                 ),
-                timeout=300  # 5 minute timeout
+                timeout=self.config.response_timeout  # Use configurable timeout
             )
             
             print()  # New line after progress

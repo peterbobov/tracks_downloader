@@ -226,17 +226,23 @@ Settings → Privacy → Active Sessions
 ### Practical Security
 For local personal use, session security is equivalent to any authenticated desktop application. Main rule: treat `sessions/` folder like your `.ssh/` folder - keep it local and protected.
 
-## Quick Start Commands (v2.1.4)
+## Quick Start Commands (v2.2.0 - Smart Library Management)
 
 ```bash
 # Setup virtual environment
 source .venv/bin/activate
 
-# Basic download
+# Basic download (saves to music library with playlist organization)
 python run.py "https://open.spotify.com/playlist/xxxxx"
 
-# Check which tracks are missing (NEW!)
+# NEW! Download only missing tracks with smart detection
+python run.py "https://open.spotify.com/playlist/xxxxx" --download-missing
+
+# Check which tracks are missing using catalog + folder scanning
 python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
+
+# NEW! Catalog your existing music library for fast lookups
+python run.py --catalog-library
 
 # Preview tracks without downloading
 python run.py "https://open.spotify.com/playlist/xxxxx" --dry-run
@@ -244,7 +250,7 @@ python run.py "https://open.spotify.com/playlist/xxxxx" --dry-run
 # Test with single track
 python run.py "https://open.spotify.com/playlist/xxxxx" --limit 1
 
-# Sequential processing (cleaner progress)
+# Sequential processing (cleaner progress, still uses playlist folders)
 python run.py "https://open.spotify.com/playlist/xxxxx" --sequential
 
 # Chunked processing (recommended for large playlists)
@@ -261,7 +267,68 @@ python run.py status
 python run.py reset
 ```
 
-## Current Implementation Status (v2.1.4 - Enhanced UX & Missing Track Detection)
+## Current Implementation Status (v2.2.0 - Smart Library Management)
+
+✅ **Smart Library Management Features:**
+- **Music Library Path**: New `MUSIC_LIBRARY_PATH` configuration for main music folder organization
+- **Consistent Playlist Organization**: All modes (sequential, parallel) save to `{music_library_path}/{playlist_name}/` structure
+- **SQLite Catalog Database**: Comprehensive track indexing with metadata extraction using mutagen library
+- **Smart Missing Track Detection**: Uses both catalog database (fast exact matches) and folder scanning (fuzzy matching) 
+- **Download Missing Tracks**: `--download-missing` flag with verbose preview and user approval
+- **Library Cataloging**: `--catalog-library` command to scan and index existing music collection
+- **Automatic Catalog Updates**: Downloaded tracks automatically added to catalog database
+- **Intelligent Track Lookup**: Prioritizes playlist-specific folders, falls back to library-wide search
+- **Enhanced Missing Analysis**: Shows tracks found by catalog vs folder scan, suggests catalog updates
+- **Metadata-Rich Storage**: Stores title, artist, album, duration, file format, and custom metadata in database
+- **Duplicate Prevention**: Smart handling of tracks appearing in multiple playlists
+- **File Organization Consistency**: Eliminates artist-based folders for cleaner playlist-based structure
+
+### New Configuration Options (v2.2.0):
+```bash
+# .env file additions
+MUSIC_LIBRARY_PATH=./music        # Main music library path (replaces scattered downloads)
+DOWNLOAD_FOLDER=./downloads       # Legacy parameter, kept for compatibility
+```
+
+### New CLI Commands (v2.2.0):
+```bash
+# Download only missing tracks with approval prompt
+python run.py "playlist_url" --download-missing --batch-size 5 --sequential
+
+# Catalog existing music library for fast track lookups  
+python run.py --catalog-library
+
+# Enhanced missing track detection with catalog + folder scanning
+python run.py "playlist_url" --check-missing
+```
+
+### Workflow Examples (v2.2.0):
+```bash
+# 1. Initial setup - catalog existing music
+python run.py --catalog-library
+# → Scans ./music/ recursively, extracts metadata, creates catalog.db
+
+# 2. Check what's missing from a new playlist
+python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
+# → Fast catalog lookup + fallback folder scanning
+# → Shows: "Found in catalog: 85, Found by folder scan: 3, Missing: 12"
+
+# 3. Download only the missing tracks
+python run.py "https://open.spotify.com/playlist/xxxxx" --download-missing
+# → Shows detailed preview of 12 missing tracks with metadata
+# → Asks for user approval: "Download 12 missing tracks? (yes/no):"
+# → Downloads only missing tracks to ./music/Playlist Name/
+
+# 4. All tracks now organized consistently in playlist folders
+# ./music/
+#   ├── Playlist Name/
+#   │   ├── Artist - Track1.flac
+#   │   ├── Artist - Track2.flac
+#   └── Another Playlist/
+#       ├── Artist - Track3.flac
+```
+
+## Previous Implementation Status (v2.1.4 - Enhanced UX & Missing Track Detection)
 
 ✅ **Enhanced UX & Missing Track Detection Features:**
 - **@LosslessRobot Integration**: Fully optimized for [@LosslessRobot](https://t.me/LosslessRobot) Telegram bot
@@ -294,34 +361,46 @@ spotify_downloader/
 │   ├── __init__.py
 │   ├── spotify_api.py         # Spotify API interactions
 │   ├── telegram_client.py     # Telegram/Telethon handling
-│   ├── file_manager.py        # Download organization
+│   ├── file_manager.py        # Download organization & catalog integration
+│   ├── catalog.py             # SQLite database for track indexing (NEW!)
 │   ├── progress_tracker.py    # Session & progress management
 │   └── main.py               # Main orchestrator
-├── run.py                     # CLI entry point
+├── run.py                     # CLI entry point with new --download-missing
+├── catalog.db                 # SQLite track catalog database (created automatically)
 ├── telethon_downloader.py     # Legacy monolithic version
-├── requirements.txt           # Python dependencies
-├── .env.example              # Configuration template
+├── requirements.txt           # Python dependencies (now includes mutagen)
+├── .env.example              # Configuration template (NEW: MUSIC_LIBRARY_PATH)
 ├── .gitignore                # Security exclusions
 └── README.md                 # User documentation
 ```
 
-## Quick Start with New Architecture
+## Quick Start with Smart Library Management (v2.2.0)
 
 ```bash
 # Setup virtual environment
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependencies
+# Install dependencies (now includes mutagen for metadata extraction)
 pip install -r requirements.txt
 
 # Configure credentials in .env file
 cp .env.example .env
-# Edit .env with your API credentials
+# Edit .env with your API credentials AND set MUSIC_LIBRARY_PATH=./music
 
-# Run commands
+# NEW WORKFLOW: Smart library management
+# 1. Catalog existing music (one-time setup)
+python run.py --catalog-library
+
+# 2. Check what's missing from a playlist
+python run.py https://open.spotify.com/playlist/xxxxx --check-missing
+
+# 3. Download only missing tracks with approval
+python run.py https://open.spotify.com/playlist/xxxxx --download-missing
+
+# Traditional commands still work
 python run.py --help                                          # Show help
-python run.py https://open.spotify.com/playlist/xxxxx         # Download playlist
+python run.py https://open.spotify.com/playlist/xxxxx         # Download entire playlist
 python run.py https://open.spotify.com/playlist/xxxxx --dry-run  # Preview tracks
 python run.py status                                          # Check progress
 python run.py report                                          # Generate report
@@ -565,14 +644,48 @@ python run.py "https://open.spotify.com/playlist/3i1D6J1DTyoGfaXMvz5M8E" --dry-r
    git config user.email "your-email@example.com"
    ```
 
+## Recent Updates (December 2025)
+
+### v2.2.0 - Smart Library Management (LATEST)
+**Revolutionary update with music library cataloging and smart missing track detection**
+
+#### 🎯 **Major New Features**
+- **SQLite Catalog Database**: Complete track indexing with metadata extraction using mutagen library
+- **Smart Missing Track Detection**: Combines fast catalog lookup with fuzzy folder scanning
+- **Download Missing Tracks**: `--download-missing` flag with detailed preview and user approval
+- **Music Library Organization**: Consistent playlist-based folder structure for all processing modes
+- **Library Cataloging**: `--catalog-library` command to scan and index existing music collections
+- **Intelligent Track Matching**: Prioritizes playlist folders, falls back to library-wide search
+
+#### 🏗️ **Architecture Improvements**
+- **New catalog.py Module**: Comprehensive SQLite database management for track metadata
+- **Enhanced FileManager**: Automatic catalog integration with downloaded tracks
+- **Music Library Path**: New `MUSIC_LIBRARY_PATH` configuration replaces scattered downloads
+- **Consistent File Organization**: All modes save to `{music_library_path}/{playlist_name}/` structure
+
+#### 💡 **User Experience**
+- **One-Command Missing Downloads**: No manual track number calculation needed
+- **Verbose Download Previews**: Shows track details, duration, album info before download
+- **Smart Approval Prompts**: Clear information about what will be downloaded and where
+- **Catalog Update Suggestions**: Prompts to update catalog when tracks found by folder scan
+- **Enhanced Missing Analysis**: Shows tracks found by database vs folder scanning methods
+
+#### 🔧 **Technical Features**
+- **Metadata Extraction**: Supports FLAC, MP3, WAV, M4A, OGG with rich metadata storage
+- **Fuzzy String Matching**: 90% similarity threshold for filename variations
+- **Automatic Catalog Updates**: Downloaded tracks automatically indexed in database
+- **Duplicate Prevention**: Smart handling of tracks appearing in multiple playlists
+- **File Validation**: Ensures catalog entries point to existing files
+
 ## Future Enhancements
 
 - [ ] Web UI for easier interaction
-- [ ] Multiple bot support
+- [ ] Multiple bot support  
 - [ ] Playlist monitoring for new tracks
 - [ ] Audio format conversion
-- [ ] Metadata tagging
+- [ ] Advanced metadata tagging with cover art
 - [ ] Cloud storage integration
 - [ ] Docker containerization
 - [ ] API rate limit visualization
 - [ ] Automatic credential validation on startup
+- [ ] Music library statistics dashboard

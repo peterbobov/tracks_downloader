@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .spotify_api import Track
+from .catalog import LibraryCatalog, create_catalog
 
 
 @dataclass
@@ -57,6 +58,9 @@ class FileManager:
         
         # Playlist organization
         self.current_playlist_name = None
+        
+        # Catalog integration
+        self.catalog = None
         
         # Statistics
         self.download_stats = {
@@ -98,18 +102,21 @@ class FileManager:
         """Set the current playlist name for file organization"""
         self.current_playlist_name = playlist_name
     
+    def enable_catalog(self, catalog_path: Optional[str] = None):
+        """Enable catalog integration"""
+        self.catalog = create_catalog(catalog_path)
+    
     def get_organized_path(self, track: Track, filename: str) -> Path:
         """Get the organized file path based on configuration"""
         base_path = self.download_folder
         
-        # Use playlist name for organization if available
+        # Always use playlist name for organization when available
         if self.current_playlist_name:
             playlist_folder = self.sanitize_filename(self.current_playlist_name, 100)
             base_path = base_path / playlist_folder
         else:
-            # Fallback to artist organization
-            artist_name = self.sanitize_filename(track.artists[0] if track.artists else "Unknown Artist", 50)
-            base_path = base_path / artist_name
+            # If no playlist name, use "Unknown Playlist" to maintain consistent structure
+            base_path = base_path / "Unknown Playlist"
         
         # Create directory if it doesn't exist
         base_path.mkdir(parents=True, exist_ok=True)
@@ -242,6 +249,14 @@ class FileManager:
             file_size = final_path.stat().st_size
             self.download_stats['total_downloaded'] += 1
             self.download_stats['total_size_bytes'] += file_size
+            
+            # Add to catalog if enabled
+            if self.catalog:
+                try:
+                    self.catalog.add_track(final_path, self.current_playlist_name)
+                except Exception as e:
+                    # Don't fail the download if catalog fails
+                    print(f"Warning: Failed to add track to catalog: {e}")
             
             return DownloadResult(
                 success=True,
