@@ -401,9 +401,11 @@ class SpotifyDownloader:
                     
                     print(f"\n{Fore.CYAN}[{global_index}/{total_tracks}] Processing: {track.artist_string} - {track.name}{Style.RESET_ALL}")
                     
+                    # Mark as sent immediately (before potential failure)
+                    self.progress_tracker.mark_track_sent(track.id)
+                    
                     # Send to bot
                     if await self.telegram.send_track_to_bot(track):
-                        self.progress_tracker.mark_track_sent(track.id)
                         if self.on_track_sent:
                             await self.on_track_sent(track, global_index, total_tracks)
                         
@@ -436,9 +438,11 @@ class SpotifyDownloader:
                     
                     print(f"\n{Fore.CYAN}[{global_index}/{total_tracks}] Sending: {track.artist_string} - {track.name}{Style.RESET_ALL}")
                     
+                    # Mark as sent immediately (before potential failure)
+                    self.progress_tracker.mark_track_sent(track.id)
+                    
                     # Send to bot
                     if await self.telegram.send_track_to_bot(track):
-                        self.progress_tracker.mark_track_sent(track.id)
                         if self.on_track_sent:
                             await self.on_track_sent(track, global_index, total_tracks)
                     else:
