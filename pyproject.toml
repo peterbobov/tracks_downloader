@@ -1,6 +1,6 @@
 [project]
 name = "spotify-downloader"
-version = "2.2.0"
+version = "3.0.0"
 description = "Automate downloading DJ tracks from Spotify playlists via Telegram bot"
 requires-python = ">=3.12"
 dependencies = [
