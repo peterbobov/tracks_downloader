@@ -26,6 +26,7 @@ from .constants import Defaults, EnvVars, BatchConstants
 from .telegram_client import TelegramMessenger, TelegramConfig, create_telegram_messenger
 from .file_manager import FileManager, FileConfig, create_file_manager
 from .progress_tracker import ProgressTracker, TrackStatus, create_progress_tracker
+from .catalog import LibraryCatalog
 
 # Initialize colorama
 init()
@@ -49,7 +50,7 @@ class DownloadConfig:
     music_library_path: str = Defaults.MUSIC_LIBRARY_PATH
     delay_between_requests: float = Defaults.DELAY_BETWEEN_REQUESTS
     max_retries: int = Defaults.MAX_RETRIES
-    batch_size: int = 10
+    batch_size: int = 3
     response_timeout: int = Defaults.RESPONSE_TIMEOUT
 
     # File organization
@@ -219,9 +220,9 @@ class SpotifyDownloader:
             create_year_folders=config.create_year_folders
         )
         
-        # Enable catalog integration
-        self.file_manager.enable_catalog()
-        
+        # Catalog for track dedup
+        self.catalog = LibraryCatalog()
+
         self.progress_tracker = create_progress_tracker(config.progress_file)
         
         # Runtime components (initialized during operation)
@@ -335,10 +336,41 @@ class SpotifyDownloader:
             
             # Set playlist name for file organization
             self.file_manager.set_playlist_name(playlist_info['name'])
-            
+
             if dry_run:
                 return self._dry_run_report(tracks)
-            
+
+            # Check catalog — skip tracks we already have
+            missing_tracks = []
+            skipped = 0
+            for track in tracks:
+                # Check by spotify_id first
+                found = self.catalog.find_track_by_spotify_id(track.id)
+                if found:
+                    skipped += 1
+                    continue
+
+                # Fallback: check by artist:title hash
+                hash_id = LibraryCatalog.generate_track_id(track.artist_string, track.name)
+                found = self.catalog.find_track(track.name, track.artist_string)
+                if found:
+                    # Backfill spotify_id for future fast lookups
+                    self.catalog.backfill_spotify_id(hash_id, track.id)
+                    skipped += 1
+                    continue
+
+                missing_tracks.append(track)
+
+            print(f"\n  Total: {len(tracks) + skipped if start_from > 1 else len(tracks) + skipped} tracks in playlist")
+            print(f"  Already in library: {skipped}")
+            print(f"  To download: {len(missing_tracks)}")
+
+            if not missing_tracks:
+                print(f"\n{Fore.GREEN}  All tracks already in library!{Style.RESET_ALL}")
+                return {"success": True, "total": len(tracks), "skipped": skipped, "downloaded": 0}
+
+            tracks = missing_tracks
+
             # Security confirmation
             if not self._confirm_download(len(tracks), batch_size):
                 return {"success": False, "error": "Download cancelled by user"}
@@ -774,12 +806,24 @@ class SpotifyDownloader:
                 
                 if result.success:
                     self.progress_tracker.mark_track_completed(
-                        track.id, 
-                        str(result.filepath), 
+                        track.id,
+                        str(result.filepath),
                         result.file_size
                     )
+
+                    # Add to catalog with spotify_id
+                    try:
+                        self.catalog.add_track(
+                            result.filepath,
+                            playlist_source=self.file_manager.current_playlist_name or '',
+                            spotify_id=track.id
+                        )
+                    except Exception as e:
+                        if self.debug_mode:
+                            print(f"  Warning: Failed to catalog track: {e}")
+
                     self._clear_print(f"{Fore.GREEN}✓ Downloaded: {result.filepath.name} ({result.file_size:,} bytes){Style.RESET_ALL}")
-                    
+
                     if self.on_track_downloaded:
                         await self.on_track_downloaded(track, result.filepath)
                 else:
