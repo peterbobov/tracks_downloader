@@ -23,6 +23,8 @@ import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
 from spotipy.exceptions import SpotifyException
 
+from src.utils import sanitize_filename as _sanitize_filename
+
 
 @dataclass
 class Track:
@@ -54,7 +56,7 @@ class Track:
     @property
     def filename_safe_name(self) -> str:
         """Return filename-safe version of track name"""
-        return SpotifyExtractor.sanitize_filename(f"{self.artist_string} - {self.name}")
+        return _sanitize_filename(f"{self.artist_string} - {self.name}")
 
 
 class SpotifyCache:
@@ -169,20 +171,8 @@ class SpotifyExtractor:
     
     @staticmethod
     def sanitize_filename(filename: str) -> str:
-        """Sanitize filename for safe file system use"""
-        # Remove invalid characters
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            filename = filename.replace(char, '')
-        
-        # Replace multiple spaces with single space
-        filename = re.sub(r'\s+', ' ', filename)
-        
-        # Limit length
-        if len(filename) > 200:
-            filename = filename[:200]
-        
-        return filename.strip()
+        """Sanitize filename. Delegates to utils.sanitize_filename."""
+        return _sanitize_filename(filename)
     
     def extract_spotify_id(self, url: str, content_type: str) -> str:
         """Extract Spotify ID from URL"""
