@@ -13,12 +13,15 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, AsyncGenerator, Callable, Tuple
+from typing import Dict, Optional, Callable, Tuple
 from dataclasses import dataclass
 
 from fuzzywuzzy import fuzz
 
 from telethon import TelegramClient, events
+
+from .constants import TelegramConstants, MatchingWeights
+from .utils import clear_print, normalize_text
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from telethon.tl.types import (
     DocumentAttributeFilename, 
@@ -40,10 +43,10 @@ class TelegramConfig:
     phone_number: str
     bot_username: str
     session_dir: str = "./sessions"
-    delay_between_requests: float = 3.0
-    max_retries: int = 3
-    flood_wait_multiplier: float = 1.5
-    response_timeout: int = 300  # 5 minutes for large file downloads
+    delay_between_requests: float = TelegramConstants.DEFAULT_DELAY_BETWEEN_REQUESTS
+    max_retries: int = TelegramConstants.DEFAULT_MAX_RETRIES
+    flood_wait_multiplier: float = TelegramConstants.FLOOD_WAIT_MULTIPLIER
+    response_timeout: int = TelegramConstants.DEFAULT_RESPONSE_TIMEOUT
 
 
 @dataclass
@@ -57,30 +60,31 @@ class PendingRequest:
 
 class TelegramMessenger:
     """Handles all Telegram communication via Telethon"""
-    
+
     def __init__(self, config: TelegramConfig):
         self.config = config
-        
+
         # Session management
         self.session_dir = Path(config.session_dir)
         self.session_dir.mkdir(mode=0o700, exist_ok=True)
         self.session_file = self.session_dir / 'spotify_downloader.session'
-        
-        # Tracking
-        self.pending_responses: Dict[int, PendingRequest] = {}
+
+        # Tracking with async lock for thread-safe access
+        self.pending_responses: Dict[str, PendingRequest] = {}
+        self._pending_lock = asyncio.Lock()
         self.client: Optional[TelegramClient] = None
-        
+
         # Debug mode
         self.debug_mode = False
-        
+
         # Callbacks
         self.on_file_downloaded: Optional[Callable] = None
         self.on_download_failed: Optional[Callable] = None
         self.on_bot_response: Optional[Callable] = None
-    
-    def _clear_print(self, message: str):
+
+    def _clear_print(self, message: str) -> None:
         """Print message after clearing any download progress line"""
-        print(f"\r{' ' * 80}\r{message}")
+        clear_print(message)
     
     async def initialize(self) -> bool:
         """Initialize and authenticate Telegram client"""
@@ -144,9 +148,10 @@ class TelegramMessenger:
     
     async def _handle_bot_response(self, event):
         """Handle responses from the bot"""
-        # Proactive cleanup of expired requests
-        self._cleanup_expired_requests()
-        
+        # Proactive cleanup of expired requests (thread-safe)
+        async with self._pending_lock:
+            self._cleanup_expired_requests_unlocked()
+
         if self.debug_mode:
             pending_count = len(self.pending_responses)
             print(f"{Fore.MAGENTA}DEBUG: Received message type - Document: {bool(event.message.document)}, "
@@ -185,18 +190,19 @@ class TelegramMessenger:
     
     async def _handle_button_response(self, event):
         """Handle button responses from bot (track options)"""
-        # Find matching pending request
-        matched_request = self._find_matching_request()
-        
+        # Find matching pending request (thread-safe)
+        async with self._pending_lock:
+            matched_request = self._find_matching_request_unlocked()
+
         if not matched_request:
             print(f"{Fore.YELLOW}Received buttons but no matching request found{Style.RESET_ALL}")
             return
-        
+
         track_name = matched_request.track_name
-        
+
         # Log button options received
         self._clear_print(f"{Fore.CYAN}Bot found options for: {track_name}{Style.RESET_ALL}")
-        
+
         # Click the first button automatically
         try:
             if event.message.buttons and len(event.message.buttons) > 0:
@@ -205,11 +211,11 @@ class TelegramMessenger:
                     first_button = first_row[0]
                 else:
                     first_button = first_row
-                
+
                 # Click the button to select track
                 await event.message.click(0)  # Click first button (index 0)
                 self._clear_print(f"{Fore.GREEN}✓ Selected first option for: {track_name}{Style.RESET_ALL}")
-                
+
                 # Create new pending request for the file download with updated timestamp
                 # Use consistent key format with track ID
                 new_key = f"msg_{event.message.id}_{matched_request.track.id[:8]}"
@@ -219,8 +225,9 @@ class TelegramMessenger:
                     sent_at=datetime.now(),  # Reset timestamp for file download phase
                     message_id=event.message.id
                 )
-                self.pending_responses[new_key] = new_request
-                
+                async with self._pending_lock:
+                    self.pending_responses[new_key] = new_request
+
         except Exception as e:
             print(f"{Fore.RED}Error clicking button for {track_name}: {e}{Style.RESET_ALL}")
             if self.on_download_failed:
@@ -228,67 +235,76 @@ class TelegramMessenger:
     
     async def _handle_nothing_found_response(self, event):
         """Handle 'nothing found' image responses from bot"""
-        # Find matching pending request
-        matched_request = self._find_matching_request()
-        
+        # Find matching pending request (thread-safe)
+        async with self._pending_lock:
+            matched_request = self._find_matching_request_unlocked()
+
         if not matched_request:
             if self.debug_mode:
                 print(f"{Fore.MAGENTA}DEBUG: Received image but no matching request found. Pending: {len(self.pending_responses)}{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}Received image but no matching request found{Style.RESET_ALL}")
             # Try to clean up any orphaned requests
-            self._cleanup_orphaned_requests()
+            async with self._pending_lock:
+                self._cleanup_orphaned_requests_unlocked()
             return
-        
+
         track = matched_request.track
         track_name = matched_request.track_name
-        
+
         # Log that track was not found
         self._clear_print(f"{Fore.YELLOW}⚠ Track not available: {track_name}{Style.RESET_ALL}")
-        
+
         # Ensure the request is removed from pending responses
         # (should already be done in _find_matching_request, but double-check)
         if self.debug_mode:
             print(f"{Fore.MAGENTA}DEBUG: Pending responses after nothing found: {len(self.pending_responses)}{Style.RESET_ALL}")
-        
+
         # Notify about unavailable track
         if self.on_download_failed:
             await self.on_download_failed(track, "Track not found by bot")
-        
+
         # Clean up any orphaned requests after failure
-        self._cleanup_orphaned_requests()
+        async with self._pending_lock:
+            self._cleanup_orphaned_requests_unlocked()
     
     async def _handle_file_response(self, event):
         """Handle file responses from bot"""
         # Extract filename and metadata for smart matching
         filename, metadata = self._extract_filename_and_metadata(event.message.document, "unknown")
-        
-        # Find matching pending request using smart content-based matching
-        matched_request = self._find_best_matching_request(filename, metadata)
-        
+
+        # Find matching pending request using smart content-based matching (thread-safe)
+        async with self._pending_lock:
+            matched_request = self._find_best_matching_request_unlocked(filename, metadata)
+
         if not matched_request:
             print(f"{Fore.YELLOW}Received file '{filename}' but no matching request found{Style.RESET_ALL}")
             # Clean up any orphaned pending responses that might match this file
-            self._cleanup_orphaned_requests()
+            async with self._pending_lock:
+                self._cleanup_orphaned_requests_unlocked()
             return
-        
+
         track = matched_request.track
         track_name = matched_request.track_name
-        
+
         # Notify about file reception with smart match info
         self._clear_print(f"{Fore.CYAN}Received file for: {track_name} → {filename}{Style.RESET_ALL}")
-        
+
         # Handle the download directly
         if self.on_file_downloaded:
             await self.on_file_downloaded(event.message, filename, track, track_name)
     
-    def _find_matching_request(self) -> Optional[PendingRequest]:
-        """Find matching pending request (FIFO approach)"""
+    def _find_matching_request_unlocked(self) -> Optional[PendingRequest]:
+        """
+        Find matching pending request (FIFO approach).
+
+        Note: Must be called while holding self._pending_lock.
+        """
         cutoff_time = datetime.now() - timedelta(seconds=self.config.response_timeout)
-        
+
         # Find the oldest valid request (FIFO)
         oldest_request = None
         oldest_msg_id = None
-        
+
         for msg_id, request in list(self.pending_responses.items()):
             if request.sent_at > cutoff_time:
                 if oldest_request is None or request.sent_at < oldest_request.sent_at:
@@ -297,86 +313,91 @@ class TelegramMessenger:
             else:
                 # Remove expired requests
                 del self.pending_responses[msg_id]
-        
+
         if oldest_request and oldest_msg_id:
             del self.pending_responses[oldest_msg_id]
             return oldest_request
-        
+
         return None
     
-    def _calculate_track_similarity(self, bot_filename: str, bot_metadata: Dict, spotify_artist: str, spotify_title: str) -> float:
-        """Calculate similarity score between bot response and Spotify track"""
+    def _calculate_track_similarity(self, bot_filename: str, bot_metadata: Dict,
+                                      spotify_artist: str, spotify_title: str) -> float:
+        """
+        Calculate similarity score between bot response and Spotify track.
+
+        Uses weighted scoring across filename, performer, and title matching.
+        """
         scores = []
-        
-        # Clean up text for better matching
-        def clean_text(text):
-            return text.lower().replace('feat.', 'featuring').replace('&', 'and').strip()
-        
-        spotify_artist_clean = clean_text(spotify_artist)
-        spotify_title_clean = clean_text(spotify_title)
+
+        spotify_artist_clean = normalize_text(spotify_artist)
+        spotify_title_clean = normalize_text(spotify_title)
         spotify_full = f"{spotify_artist_clean} - {spotify_title_clean}"
-        
+
         # Score 1: Filename vs full track name (most reliable)
         if bot_filename:
-            bot_filename_clean = clean_text(bot_filename.replace('.flac', '').replace('.mp3', ''))
+            bot_filename_clean = normalize_text(bot_filename.replace('.flac', '').replace('.mp3', ''))
             filename_score = fuzz.token_sort_ratio(bot_filename_clean, spotify_full)
-            scores.append(('filename', filename_score, 0.6))  # High weight for filename
-            
+            scores.append(('filename', filename_score, MatchingWeights.FILENAME_WEIGHT))
+
             # Also try just the title part
             title_score = fuzz.token_sort_ratio(bot_filename_clean, spotify_title_clean)
-            scores.append(('filename_title', title_score, 0.3))
-        
+            scores.append(('filename_title', title_score, MatchingWeights.FILENAME_TITLE_WEIGHT))
+
         # Score 2: Audio metadata performer vs Spotify artist
         if bot_metadata.get('performer'):
-            performer_clean = clean_text(bot_metadata['performer'])
+            performer_clean = normalize_text(bot_metadata['performer'])
             performer_score = fuzz.token_sort_ratio(performer_clean, spotify_artist_clean)
-            scores.append(('performer', performer_score, 0.4))
-        
+            scores.append(('performer', performer_score, MatchingWeights.PERFORMER_WEIGHT))
+
         # Score 3: Audio metadata title vs Spotify title
         if bot_metadata.get('title'):
-            title_clean = clean_text(bot_metadata['title'])
+            title_clean = normalize_text(bot_metadata['title'])
             title_score = fuzz.token_sort_ratio(title_clean, spotify_title_clean)
-            scores.append(('title', title_score, 0.5))
-        
+            scores.append(('title', title_score, MatchingWeights.TITLE_WEIGHT))
+
         # Calculate weighted average
         if not scores:
             return 0.0
-        
+
         total_weighted = sum(score * weight for _, score, weight in scores)
         total_weight = sum(weight for _, _, weight in scores)
-        
+
         return total_weighted / total_weight if total_weight > 0 else 0.0
     
-    def _find_best_matching_request(self, bot_filename: str, bot_metadata: Dict) -> Optional[PendingRequest]:
-        """Find best matching request using content similarity"""
+    def _find_best_matching_request_unlocked(self, bot_filename: str, bot_metadata: Dict) -> Optional[PendingRequest]:
+        """
+        Find best matching request using content similarity.
+
+        Note: Must be called while holding self._pending_lock.
+        """
         # Clean up expired requests first
-        self._cleanup_expired_requests()
-        
+        self._cleanup_expired_requests_unlocked()
+
         if not self.pending_responses:
             return None
-        
+
         best_match = None
         best_score = 0.0
         best_request_id = None
         match_details = []
-        
+
         # Score all pending requests
         for request_id, request in self.pending_responses.items():
             spotify_artist = request.track.artist_string
             spotify_title = request.track.name
-            
+
             score = self._calculate_track_similarity(
-                bot_filename, bot_metadata, 
+                bot_filename, bot_metadata,
                 spotify_artist, spotify_title
             )
-            
+
             match_details.append((request_id, score, f"{spotify_artist} - {spotify_title}"))
-            
+
             if score > best_score:
                 best_score = score
                 best_match = request
                 best_request_id = request_id
-        
+
         # Debug output
         if self.debug_mode and match_details:
             print(f"{Fore.MAGENTA}DEBUG: Smart matching for '{bot_filename}':{Style.RESET_ALL}")
@@ -384,21 +405,20 @@ class TelegramMessenger:
                 print(f"{Fore.MAGENTA}  {score:5.1f}% - {track_name}{Style.RESET_ALL}")
             if best_match:
                 print(f"{Fore.MAGENTA}  → Best match: {best_score:.1f}% confidence{Style.RESET_ALL}")
-        
+
         # Use smart match if confidence is high enough
-        confidence_threshold = 70.0
-        if best_score >= confidence_threshold and best_match:
+        if best_score >= TelegramConstants.CONFIDENCE_THRESHOLD and best_match:
             if self.debug_mode:
                 print(f"{Fore.GREEN}✓ Smart match: {best_score:.1f}% confidence{Style.RESET_ALL}")
             # Remove the matched request
             del self.pending_responses[best_request_id]
             return best_match
-        
+
         # Fall back to FIFO if no good smart match
         if self.debug_mode:
             print(f"{Fore.YELLOW}→ Falling back to FIFO (best score: {best_score:.1f}%){Style.RESET_ALL}")
-        
-        return self._find_matching_request()
+
+        return self._find_matching_request_unlocked()
     
     def _extract_filename(self, document, fallback_name: str) -> str:
         """Extract filename from document or generate fallback"""
@@ -431,12 +451,20 @@ class TelegramMessenger:
         return filename, metadata
     
     async def send_track_to_bot(self, track: Track) -> bool:
-        """Send track URL to external bot with rate limiting"""
+        """
+        Send track URL to external bot with rate limiting.
+
+        Args:
+            track: The track to send to the bot
+
+        Returns:
+            True if message was sent successfully, False otherwise
+        """
         if not self.client:
             raise RuntimeError("Telegram client not initialized")
-        
+
         track_name = f"{track.artist_string} - {track.name}"
-        
+
         for attempt in range(self.config.max_retries):
             try:
                 # Send message to bot
@@ -444,33 +472,34 @@ class TelegramMessenger:
                     self.config.bot_username,
                     track.url
                 )
-                
-                # Track pending response with unique key including track ID
+
+                # Track pending response with unique key including track ID (thread-safe)
                 request_key = f"msg_{message.id}_{track.id[:8]}"
-                self.pending_responses[request_key] = PendingRequest(
-                    track=track,
-                    track_name=track_name,
-                    sent_at=datetime.now(),
-                    message_id=message.id
-                )
-                
+                async with self._pending_lock:
+                    self.pending_responses[request_key] = PendingRequest(
+                        track=track,
+                        track_name=track_name,
+                        sent_at=datetime.now(),
+                        message_id=message.id
+                    )
+
                 self._clear_print(f"{Fore.CYAN}Sent: {track_name}{Style.RESET_ALL}")
-                
+
                 # Rate limiting delay
                 await asyncio.sleep(self.config.delay_between_requests)
-                
+
                 return True
-                
+
             except FloodWaitError as e:
                 await self._handle_flood_wait(e)
                 continue
-                
+
             except Exception as e:
                 print(f"{Fore.RED}Error sending message (attempt {attempt + 1}): {e}{Style.RESET_ALL}")
                 if attempt < self.config.max_retries - 1:
                     await asyncio.sleep(5)
                 continue
-        
+
         return False
     
     async def _handle_flood_wait(self, e: FloodWaitError):
@@ -558,43 +587,52 @@ class TelegramMessenger:
         
         return results
     
-    def get_pending_count(self) -> int:
-        """Get number of pending responses"""
-        # Clean up expired requests first
-        self._cleanup_expired_requests()
-        return len(self.pending_responses)
-    
-    def _cleanup_expired_requests(self):
-        """Clean up expired pending requests"""
+    async def get_pending_count(self) -> int:
+        """Get number of pending responses (thread-safe)"""
+        async with self._pending_lock:
+            self._cleanup_expired_requests_unlocked()
+            return len(self.pending_responses)
+
+    def _cleanup_expired_requests_unlocked(self) -> None:
+        """
+        Clean up expired pending requests.
+
+        Note: Must be called while holding self._pending_lock.
+        """
         cutoff_time = datetime.now() - timedelta(seconds=self.config.response_timeout)
         expired_ids = [
             msg_id for msg_id, request in self.pending_responses.items()
             if request.sent_at <= cutoff_time
         ]
-        
+
         if expired_ids and self.debug_mode:
             print(f"{Fore.YELLOW}Cleaning up {len(expired_ids)} expired requests{Style.RESET_ALL}")
-        
+
         for msg_id in expired_ids:
             del self.pending_responses[msg_id]
-    
-    def _cleanup_orphaned_requests(self):
-        """Clean up orphaned requests that might be causing issues"""
-        if len(self.pending_responses) > 50:  # If we have too many pending
-            # Keep only the most recent 30 requests
+
+    def _cleanup_orphaned_requests_unlocked(self) -> None:
+        """
+        Clean up orphaned requests that might be causing issues.
+
+        Note: Must be called while holding self._pending_lock.
+        """
+        if len(self.pending_responses) > TelegramConstants.MAX_PENDING_REQUESTS:
+            # Keep only the most recent requests
             sorted_requests = sorted(
-                self.pending_responses.items(), 
-                key=lambda x: x[1].sent_at, 
+                self.pending_responses.items(),
+                key=lambda x: x[1].sent_at,
                 reverse=True
             )
-            
+
             # Clear all and keep only recent ones
             self.pending_responses.clear()
-            for msg_id, request in sorted_requests[:30]:
+            for msg_id, request in sorted_requests[:TelegramConstants.KEEP_RECENT_REQUESTS]:
                 self.pending_responses[msg_id] = request
-            
+
             if self.debug_mode:
-                print(f"{Fore.YELLOW}Cleaned up orphaned requests, keeping 30 most recent{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}Cleaned up orphaned requests, keeping "
+                      f"{TelegramConstants.KEEP_RECENT_REQUESTS} most recent{Style.RESET_ALL}")
     
     def set_callbacks(self, 
                      on_file_downloaded: Optional[Callable] = None,
@@ -614,12 +652,14 @@ class TelegramMessenger:
     async def wait_for_responses(self, timeout_seconds: int = 30):
         """Wait for pending responses to be processed"""
         start_time = time.time()
-        
-        while self.get_pending_count() > 0 and (time.time() - start_time) < timeout_seconds:
-            self._clear_print(f"{Fore.YELLOW}Waiting for {self.get_pending_count()} pending responses...{Style.RESET_ALL}")
+
+        pending_count = await self.get_pending_count()
+        while pending_count > 0 and (time.time() - start_time) < timeout_seconds:
+            self._clear_print(f"{Fore.YELLOW}Waiting for {pending_count} pending responses...{Style.RESET_ALL}")
             await asyncio.sleep(5)
-        
-        remaining = self.get_pending_count()
+            pending_count = await self.get_pending_count()
+
+        remaining = await self.get_pending_count()
         if remaining > 0:
             print(f"{Fore.YELLOW}Timeout reached. {remaining} responses still pending.{Style.RESET_ALL}")
 

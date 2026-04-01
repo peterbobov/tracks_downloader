@@ -21,6 +21,8 @@ from colorama import init, Fore, Style
 from dotenv import load_dotenv
 
 from .spotify_api import SpotifyExtractor, Track, create_spotify_extractor
+from .utils import clear_print
+from .constants import Defaults, EnvVars, BatchConstants
 from .telegram_client import TelegramMessenger, TelegramConfig, create_telegram_messenger
 from .file_manager import FileManager, FileConfig, create_file_manager
 from .progress_tracker import ProgressTracker, TrackStatus, create_progress_tracker
@@ -35,80 +37,155 @@ class DownloadConfig:
     # Spotify settings
     spotify_client_id: str
     spotify_client_secret: str
-    
+
     # Telegram settings
     telegram_api_id: int
     telegram_api_hash: str
     telegram_phone_number: str
     external_bot_username: str
-    
+
     # Download settings
-    download_folder: str = "./downloads"  # Legacy parameter, kept for compatibility
-    music_library_path: str = "./music"  # Main music library path
-    delay_between_requests: float = 3.0
-    max_retries: int = 3
+    download_folder: str = Defaults.DOWNLOAD_FOLDER
+    music_library_path: str = Defaults.MUSIC_LIBRARY_PATH
+    delay_between_requests: float = Defaults.DELAY_BETWEEN_REQUESTS
+    max_retries: int = Defaults.MAX_RETRIES
     batch_size: int = 10
-    response_timeout: int = 600  # 10 minutes for large files
-    
+    response_timeout: int = Defaults.RESPONSE_TIMEOUT
+
     # File organization
     organize_by_artist: bool = True
     organize_by_album: bool = False
     create_year_folders: bool = False
-    
+
     # Session management
-    progress_file: str = "progress.json"
-    session_dir: str = "./sessions"
-    
+    progress_file: str = Defaults.PROGRESS_FILE
+    session_dir: str = Defaults.SESSION_DIR
+
+    @classmethod
+    def _validate_env_var(cls, name: str, value: str, min_length: int = 1) -> str:
+        """Validate environment variable is not empty"""
+        if not value or len(value.strip()) < min_length:
+            raise ValueError(f"{name} is empty or too short (minimum {min_length} characters)")
+        return value.strip()
+
+    @classmethod
+    def _validate_numeric(cls, name: str, value: str, min_val: float = 0,
+                          max_val: float = None, is_int: bool = False) -> float:
+        """Validate numeric environment variable"""
+        try:
+            num_value = int(value) if is_int else float(value)
+        except ValueError:
+            raise ValueError(f"{name} must be a valid {'integer' if is_int else 'number'}, got: {value}")
+
+        if num_value < min_val:
+            raise ValueError(f"{name} must be at least {min_val}, got: {num_value}")
+        if max_val is not None and num_value > max_val:
+            raise ValueError(f"{name} must be at most {max_val}, got: {num_value}")
+
+        return num_value
+
     @classmethod
     def from_env(cls, dry_run: bool = False) -> 'DownloadConfig':
-        """Create config from environment variables"""
+        """
+        Create config from environment variables with validation.
+
+        Args:
+            dry_run: If True, only Spotify credentials are required
+
+        Returns:
+            Validated DownloadConfig instance
+
+        Raises:
+            ValueError: If required variables are missing or invalid
+        """
         load_dotenv()
-        
-        # For dry run, only Spotify credentials are required
+
+        # Validate and get Spotify credentials (always required)
+        spotify_client_id = os.getenv(EnvVars.SPOTIFY_CLIENT_ID, '').strip()
+        spotify_client_secret = os.getenv(EnvVars.SPOTIFY_CLIENT_SECRET, '').strip()
+
+        if not spotify_client_id:
+            raise ValueError(f"Missing required variable: {EnvVars.SPOTIFY_CLIENT_ID}")
+        if not spotify_client_secret:
+            raise ValueError(f"Missing required variable: {EnvVars.SPOTIFY_CLIENT_SECRET}")
+
+        # Validate Spotify credentials format
+        cls._validate_env_var(EnvVars.SPOTIFY_CLIENT_ID, spotify_client_id, min_length=10)
+        cls._validate_env_var(EnvVars.SPOTIFY_CLIENT_SECRET, spotify_client_secret, min_length=10)
+
+        # Validate optional numeric settings
+        delay = cls._validate_numeric(
+            EnvVars.DELAY_BETWEEN_REQUESTS,
+            os.getenv(EnvVars.DELAY_BETWEEN_REQUESTS, str(Defaults.DELAY_BETWEEN_REQUESTS)),
+            min_val=0, max_val=3600
+        )
+        max_retries = int(cls._validate_numeric(
+            EnvVars.MAX_RETRIES,
+            os.getenv(EnvVars.MAX_RETRIES, str(Defaults.MAX_RETRIES)),
+            min_val=1, max_val=10, is_int=True
+        ))
+        response_timeout = int(cls._validate_numeric(
+            EnvVars.RESPONSE_TIMEOUT,
+            os.getenv(EnvVars.RESPONSE_TIMEOUT, str(Defaults.RESPONSE_TIMEOUT)),
+            min_val=30, max_val=3600, is_int=True
+        ))
+
+        # For dry run, use dummy Telegram values
         if dry_run:
-            spotify_vars = ['SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET']
-            missing_spotify = [var for var in spotify_vars if not os.getenv(var)]
-            if missing_spotify:
-                raise ValueError(f"Missing required Spotify variables: {', '.join(missing_spotify)}")
-            
-            # Return config with dummy Telegram values for dry run
             return cls(
-                spotify_client_id=os.getenv('SPOTIFY_CLIENT_ID'),
-                spotify_client_secret=os.getenv('SPOTIFY_CLIENT_SECRET'),
+                spotify_client_id=spotify_client_id,
+                spotify_client_secret=spotify_client_secret,
                 telegram_api_id=12345,  # Dummy value
                 telegram_api_hash="dummy_hash",  # Dummy value
                 telegram_phone_number="+1234567890",  # Dummy value
                 external_bot_username="@dummy_bot",  # Dummy value
-                download_folder=os.getenv('DOWNLOAD_FOLDER', './downloads'),
-                music_library_path=os.getenv('MUSIC_LIBRARY_PATH', './music'),
-                delay_between_requests=float(os.getenv('DELAY_BETWEEN_REQUESTS', 3.0)),
-                max_retries=int(os.getenv('MAX_RETRIES', 3)),
-                response_timeout=int(os.getenv('RESPONSE_TIMEOUT', 600)),
+                download_folder=os.getenv(EnvVars.DOWNLOAD_FOLDER, Defaults.DOWNLOAD_FOLDER),
+                music_library_path=os.getenv(EnvVars.MUSIC_LIBRARY_PATH, Defaults.MUSIC_LIBRARY_PATH),
+                delay_between_requests=delay,
+                max_retries=max_retries,
+                response_timeout=response_timeout,
             )
-        
-        # For actual download, all credentials are required
-        required_vars = [
-            'SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET',
-            'TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 
-            'TELEGRAM_PHONE_NUMBER', 'EXTERNAL_BOT_USERNAME'
-        ]
-        
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
-        if missing_vars:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
-        
+
+        # For actual download, validate Telegram credentials
+        telegram_api_id_str = os.getenv(EnvVars.TELEGRAM_API_ID, '').strip()
+        telegram_api_hash = os.getenv(EnvVars.TELEGRAM_API_HASH, '').strip()
+        telegram_phone = os.getenv(EnvVars.TELEGRAM_PHONE_NUMBER, '').strip()
+        bot_username = os.getenv(EnvVars.EXTERNAL_BOT_USERNAME, '').strip()
+
+        if not telegram_api_id_str:
+            raise ValueError(f"Missing required variable: {EnvVars.TELEGRAM_API_ID}")
+        if not telegram_api_hash:
+            raise ValueError(f"Missing required variable: {EnvVars.TELEGRAM_API_HASH}")
+        if not telegram_phone:
+            raise ValueError(f"Missing required variable: {EnvVars.TELEGRAM_PHONE_NUMBER}")
+        if not bot_username:
+            raise ValueError(f"Missing required variable: {EnvVars.EXTERNAL_BOT_USERNAME}")
+
+        # Validate Telegram API ID is a valid integer
+        try:
+            telegram_api_id = int(telegram_api_id_str)
+        except ValueError:
+            raise ValueError(f"{EnvVars.TELEGRAM_API_ID} must be a valid integer")
+
+        # Validate Telegram API hash format
+        cls._validate_env_var(EnvVars.TELEGRAM_API_HASH, telegram_api_hash, min_length=20)
+
+        # Validate phone number format (basic check)
+        if not telegram_phone.startswith('+'):
+            raise ValueError(f"{EnvVars.TELEGRAM_PHONE_NUMBER} must start with '+' and include country code")
+
         return cls(
-            spotify_client_id=os.getenv('SPOTIFY_CLIENT_ID'),
-            spotify_client_secret=os.getenv('SPOTIFY_CLIENT_SECRET'),
-            telegram_api_id=int(os.getenv('TELEGRAM_API_ID')),
-            telegram_api_hash=os.getenv('TELEGRAM_API_HASH'),
-            telegram_phone_number=os.getenv('TELEGRAM_PHONE_NUMBER'),
-            external_bot_username=os.getenv('EXTERNAL_BOT_USERNAME'),
-            download_folder=os.getenv('DOWNLOAD_FOLDER', './downloads'),
-            music_library_path=os.getenv('MUSIC_LIBRARY_PATH', './music'),
-            delay_between_requests=float(os.getenv('DELAY_BETWEEN_REQUESTS', 3.0)),
-            max_retries=int(os.getenv('MAX_RETRIES', 3)),
-            response_timeout=int(os.getenv('RESPONSE_TIMEOUT', 60)),
+            spotify_client_id=spotify_client_id,
+            spotify_client_secret=spotify_client_secret,
+            telegram_api_id=telegram_api_id,
+            telegram_api_hash=telegram_api_hash,
+            telegram_phone_number=telegram_phone,
+            external_bot_username=bot_username,
+            download_folder=os.getenv(EnvVars.DOWNLOAD_FOLDER, Defaults.DOWNLOAD_FOLDER),
+            music_library_path=os.getenv(EnvVars.MUSIC_LIBRARY_PATH, Defaults.MUSIC_LIBRARY_PATH),
+            delay_between_requests=delay,
+            max_retries=max_retries,
+            response_timeout=response_timeout,
         )
 
 
@@ -162,9 +239,9 @@ class SpotifyDownloader:
         self.on_track_downloaded: Optional[Callable] = None
         self.on_track_failed: Optional[Callable] = None
     
-    def _clear_print(self, message: str):
+    def _clear_print(self, message: str) -> None:
         """Print message after clearing any download progress line"""
-        print(f"\r{' ' * 80}\r{message}")
+        clear_print(message)
     
     async def initialize(self) -> bool:
         """Initialize all components"""
@@ -454,70 +531,76 @@ class SpotifyDownloader:
                 # Wait for ALL tracks in this batch to complete before next batch
                 if batch_end < total_tracks:
                     self._clear_print(f"{Fore.YELLOW}Waiting for batch to complete before processing next batch...{Style.RESET_ALL}")
-                    # Use shorter timeout for batches to prevent hanging (5 minutes max per batch)
-                    batch_timeout = min(300, self.config.response_timeout) 
+                    # Dynamic timeout based on batch size - at least 1 minute per track
+                    # This ensures large files have enough time to download
+                    batch_timeout = max(
+                        BatchConstants.DEFAULT_BATCH_TIMEOUT,
+                        len(batch) * BatchConstants.MIN_TIMEOUT_PER_TRACK
+                    )
+                    batch_timeout = min(batch_timeout, BatchConstants.MAX_BATCH_TIMEOUT)
                     await self._wait_for_batch_completion(batch, timeout=batch_timeout)
         
         # Wait for final responses and downloads to complete
         self._clear_print(f"{Fore.YELLOW}Waiting for remaining bot responses...{Style.RESET_ALL}")
-        
+
         # Wait longer and check for downloads more frequently
         total_wait_time = 0
         max_wait_time = self.config.response_timeout
-        
+
         # For single track downloads, use shorter but reasonable timeout
         session = self.progress_tracker.current_session
         if session and len(session.tracks) == 1:
             max_wait_time = max(self.config.response_timeout, 900)  # At least 15 minutes for single track
-        
+
         while total_wait_time < max_wait_time:
-            # Wait for responses
-            pending_responses = self.telegram.get_pending_count()
-            
+            # Wait for responses (async call)
+            pending_responses = await self.telegram.get_pending_count()
+
             # Check for incomplete tracks (sent_to_bot, downloading, etc.)
             session = self.progress_tracker.current_session
             incomplete_tracks = []
             if session:
                 incomplete_tracks = [
-                    track for track in session.tracks.values() 
+                    track for track in session.tracks.values()
                     if track.status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]
                 ]
-            
+
             if pending_responses == 0 and len(incomplete_tracks) == 0:
                 print(f"{Fore.GREEN}All responses and downloads completed{Style.RESET_ALL}")
                 break
-            
+
             # If all tracks are in final states but we still have pending responses, clean them up
             if len(incomplete_tracks) == 0 and pending_responses > 0:
                 if self.debug_mode:
                     print(f"{Fore.MAGENTA}DEBUG: All tracks finished but {pending_responses} pending responses remain - cleaning up{Style.RESET_ALL}")
-                # Force cleanup of orphaned requests
-                self.telegram._cleanup_orphaned_requests()
-                pending_responses = self.telegram.get_pending_count()
-                
+                # Force cleanup of orphaned requests (using async lock)
+                async with self.telegram._pending_lock:
+                    self.telegram._cleanup_orphaned_requests_unlocked()
+                pending_responses = await self.telegram.get_pending_count()
+
                 # If we still have pending responses after cleanup, force exit
                 if pending_responses > 0:
                     if self.debug_mode:
                         print(f"{Fore.MAGENTA}DEBUG: Still {pending_responses} pending after cleanup - force breaking{Style.RESET_ALL}")
                     print(f"{Fore.YELLOW}All tracks processed, ending session{Style.RESET_ALL}")
                     break
-            
+
             if pending_responses > 0:
                 self._clear_print(f"{Fore.YELLOW}Waiting for {pending_responses} pending responses...{Style.RESET_ALL}")
-            
+
             if len(incomplete_tracks) > 0:
                 # Show what we're waiting for
                 waiting_for_bot = len([t for t in incomplete_tracks if t.status == TrackStatus.SENT_TO_BOT])
                 downloading = len([t for t in incomplete_tracks if t.status == TrackStatus.DOWNLOADING])
-                
+
                 if waiting_for_bot > 0:
                     self._clear_print(f"{Fore.YELLOW}Waiting for {waiting_for_bot} bot responses...{Style.RESET_ALL}")
                 if downloading > 0:
                     self._clear_print(f"{Fore.YELLOW}Waiting for {downloading} downloads to complete...{Style.RESET_ALL}")
-            
+
             await asyncio.sleep(5)
             total_wait_time += 5
-        
+
         if total_wait_time >= max_wait_time:
             print(f"{Fore.RED}Timeout reached after {max_wait_time} seconds{Style.RESET_ALL}")
         
@@ -558,22 +641,28 @@ class SpotifyDownloader:
         return self._is_track_completed(track_id)
     
     async def _wait_for_batch_completion(self, batch_tracks: List[Track], timeout: int = 600):
-        """Wait for all tracks in a batch to complete (success, fail, or not found)"""
+        """
+        Wait for all tracks in a batch to complete (success, fail, or not found).
+
+        Note: On timeout, tracks are NOT marked as failed - they continue processing
+        in the background and can still complete in subsequent batches. This prevents
+        losing tracks that are just slow to download.
+        """
         start_time = time.time()
         batch_track_ids = [track.id for track in batch_tracks]
-        
+
         if self.debug_mode:
             print(f"{Fore.MAGENTA}DEBUG: Waiting for batch with track IDs: {batch_track_ids}{Style.RESET_ALL}")
-        
+
         while (time.time() - start_time) < timeout:
             session = self.progress_tracker.current_session
             if not session:
                 break
-            
+
             # Check status of all tracks in this batch
             incomplete_tracks = []
             completed_statuses = []
-            
+
             for track_id in batch_track_ids:
                 if track_id in session.tracks:
                     track_status = session.tracks[track_id].status
@@ -585,25 +674,26 @@ class SpotifyDownloader:
                     # Track not in session yet - still incomplete
                     incomplete_tracks.append(track_id)
                     completed_statuses.append("not_in_session")
-            
+
             if self.debug_mode and len(incomplete_tracks) > 0:
                 print(f"{Fore.MAGENTA}DEBUG: Incomplete tracks: {incomplete_tracks}, Statuses: {completed_statuses}{Style.RESET_ALL}")
-            
+
             if not incomplete_tracks:
                 print(f"{Fore.GREEN}✓ Batch completed - all tracks processed{Style.RESET_ALL}")
                 break
-            
+
             # Show progress (only if different from last message)
             completed_count = len(batch_track_ids) - len(incomplete_tracks)
             progress_message = f"Batch progress: {completed_count}/{len(batch_track_ids)} tracks completed"
-            
+
             if progress_message != self.last_batch_progress_message:
                 self._clear_print(f"{Fore.YELLOW}{progress_message}{Style.RESET_ALL}")
                 self.last_batch_progress_message = progress_message
-            
+
             await asyncio.sleep(5)  # Check every 5 seconds
-        
-        # Final status check
+
+        # Final status check - inform user about incomplete tracks but DON'T mark as failed
+        # They will continue processing and can complete while next batch runs
         session = self.progress_tracker.current_session
         if session:
             final_incomplete = []
@@ -613,46 +703,55 @@ class SpotifyDownloader:
                     if track_status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]:
                         final_incomplete.append(track_id)
                 else:
-                    # Track never made it to session - this is likely the issue
                     final_incomplete.append(track_id)
-            
+
             if final_incomplete:
                 elapsed_time = time.time() - start_time
-                if elapsed_time >= timeout:
-                    print(f"{Fore.RED}Batch timeout after {elapsed_time:.0f}s: {len(final_incomplete)} tracks incomplete{Style.RESET_ALL}")
-                else:
-                    print(f"{Fore.YELLOW}Force completing batch: {len(final_incomplete)} tracks may still be processing{Style.RESET_ALL}")
-                
-                # Show which tracks are stuck and their status
-                for track_id in final_incomplete:
-                    if track_id in session.tracks:
-                        track_progress = session.tracks[track_id]
-                        print(f"{Fore.RED}  - Stuck track: {track_progress.track_name} (Status: {track_progress.status.value}){Style.RESET_ALL}")
-                    else:
-                        # Find the track name from batch_tracks
-                        track_name = "Unknown"
-                        for track in batch_tracks:
-                            if track.id == track_id:
-                                track_name = f"{track.artist_string} - {track.name}"
-                                break
-                        print(f"{Fore.RED}  - Track not in session: {track_name}{Style.RESET_ALL}")
-                        # Create session entry and mark as failed
-                        self.progress_tracker.mark_track_failed(track_id, "Track not processed by session")
-                
-                # Mark session tracks as failed due to timeout only if we actually timed out
-                if elapsed_time >= timeout:
+                # Only show warning, don't mark as failed - let them continue processing
+                print(f"{Fore.YELLOW}Batch timeout after {elapsed_time:.0f}s: {len(final_incomplete)} tracks still processing{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}  These tracks will continue downloading in background...{Style.RESET_ALL}")
+
+                if self.debug_mode:
+                    # Show which tracks are still processing
                     for track_id in final_incomplete:
                         if track_id in session.tracks:
-                            self.progress_tracker.mark_track_failed(track_id, "Batch timeout")
+                            track_progress = session.tracks[track_id]
+                            print(f"{Fore.MAGENTA}  - Continuing: {track_progress.track_name} (Status: {track_progress.status.value}){Style.RESET_ALL}")
+                        else:
+                            track_name = "Unknown"
+                            for track in batch_tracks:
+                                if track.id == track_id:
+                                    track_name = f"{track.artist_string} - {track.name}"
+                                    break
+                            print(f"{Fore.MAGENTA}  - Not in session yet: {track_name}{Style.RESET_ALL}")
     
     
     async def _handle_file_downloaded(self, message, filename: str, track: Track, track_name: str):
-        """Handle file downloaded from Telegram"""
+        """
+        Handle file downloaded from Telegram.
+
+        This can be called for tracks from previous batches that are still completing.
+        We should always try to complete the download regardless of batch timing.
+
+        Args:
+            message: Telegram message containing the file
+            filename: Name of the file from bot
+            track: Track object with metadata
+            track_name: Human-readable track name for logging
+        """
         self._clear_print(f"{Fore.CYAN}Processing downloaded file: {filename}{Style.RESET_ALL}")
-        
+
         if self.debug_mode:
-            print(f"{Fore.MAGENTA}DEBUG: Marking track {track.id} as downloading{Style.RESET_ALL}")
-        
+            print(f"{Fore.MAGENTA}DEBUG: Processing {track_name} (ID: {track.id}){Style.RESET_ALL}")
+
+        # Check if track was previously marked as failed due to timeout - we can still save it!
+        session = self.progress_tracker.current_session
+        if session and track.id in session.tracks:
+            current_status = session.tracks[track.id].status
+            if current_status == TrackStatus.FAILED:
+                print(f"{Fore.GREEN}Recovering track from timeout: {track_name}{Style.RESET_ALL}")
+                # Reset status - we're getting the file now!
+
         # Update progress immediately
         self.progress_tracker.mark_track_downloading(track.id)
         
@@ -660,15 +759,12 @@ class SpotifyDownloader:
             print(f"{Fore.MAGENTA}DEBUG: Track marked as downloading{Style.RESET_ALL}")
         
         try:
-            # Generate organized file path
-            final_path = self.file_manager.get_download_path(track, filename)
-            
-            # Download file from Telegram
+            # Download file from Telegram to temp location
             temp_path = Path(self.config.download_folder) / "temp" / filename
             temp_path.parent.mkdir(exist_ok=True, parents=True)
-            
+
             download_success = await self.telegram.download_file(message, temp_path)
-            
+
             if self.debug_mode:
                 print(f"{Fore.MAGENTA}DEBUG: Download success: {download_success}{Style.RESET_ALL}")
             
@@ -710,13 +806,14 @@ class SpotifyDownloader:
         """Handle download failure"""
         self._clear_print(f"{Fore.RED}Download failed: {track.artist_string} - {track.name}{Style.RESET_ALL}")
         print(f"{Fore.RED}Error: {error_message}{Style.RESET_ALL}")
-        
+
         self.progress_tracker.mark_track_failed(track.id, error_message)
-        
-        # Clean up any orphaned pending requests when a track fails
+
+        # Clean up any orphaned pending requests when a track fails (thread-safe)
         if self.telegram:
-            self.telegram._cleanup_orphaned_requests()
-        
+            async with self.telegram._pending_lock:
+                self.telegram._cleanup_orphaned_requests_unlocked()
+
         if self.on_track_failed:
             await self.on_track_failed(track, error_message)
     

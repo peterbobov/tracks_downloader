@@ -349,30 +349,82 @@ class LibraryCatalog:
             
             return [CatalogTrack(**dict(row)) for row in cursor.fetchall()]
     
-    def get_missing_tracks(self, expected_tracks: List[Tuple[str, str]], 
+    def get_missing_tracks(self, expected_tracks: List[Tuple[str, str]],
                           playlist_name: Optional[str] = None) -> List[Tuple[str, str]]:
         """
-        Check which tracks from expected list are missing from catalog
-        expected_tracks: List of (title, artist) tuples
-        Returns: List of missing (title, artist) tuples
+        Check which tracks from expected list are missing from catalog.
+
+        Uses batch query to check all tracks in a single database operation,
+        avoiding N+1 query performance issues.
+
+        Args:
+            expected_tracks: List of (title, artist) tuples
+            playlist_name: Optional playlist filter (not currently used)
+
+        Returns:
+            List of missing (title, artist) tuples
         """
+        if not expected_tracks:
+            return []
+
+        # Generate all track IDs for batch lookup
+        track_ids = [self.generate_track_id(title, artist) for title, artist in expected_tracks]
+
+        # Single batch query for all tracks
+        with sqlite3.connect(self.catalog_path) as conn:
+            placeholders = ','.join(['?' for _ in track_ids])
+            cursor = conn.execute(
+                f"SELECT id, file_path FROM tracks WHERE id IN ({placeholders})",
+                track_ids
+            )
+            existing_tracks = {row[0]: row[1] for row in cursor.fetchall()}
+
+        # Check which tracks are missing or have missing files
         missing = []
-        
-        for title, artist in expected_tracks:
-            # First check in catalog database
-            catalog_track = self.find_track(title, artist)
-            
-            if catalog_track:
+        tracks_to_remove = []
+
+        for (title, artist), track_id in zip(expected_tracks, track_ids):
+            if track_id in existing_tracks:
+                file_path = existing_tracks[track_id]
                 # Found in catalog, check if file still exists
-                if not Path(catalog_track.file_path).exists():
-                    # File is missing, remove from catalog and mark as missing
-                    self.remove_track_by_path(catalog_track.file_path)
+                if not Path(file_path).exists():
+                    # File is missing, mark for removal
+                    tracks_to_remove.append(file_path)
                     missing.append((title, artist))
             else:
                 # Not in catalog at all
                 missing.append((title, artist))
-        
+
+        # Batch remove tracks with missing files
+        if tracks_to_remove:
+            self._batch_remove_tracks_by_paths(tracks_to_remove)
+
         return missing
+
+    def _batch_remove_tracks_by_paths(self, file_paths: List[str]) -> int:
+        """
+        Remove multiple tracks from catalog by file paths in a single operation.
+
+        Args:
+            file_paths: List of file paths to remove
+
+        Returns:
+            Number of tracks removed
+        """
+        if not file_paths:
+            return 0
+
+        try:
+            with sqlite3.connect(self.catalog_path) as conn:
+                placeholders = ','.join(['?' for _ in file_paths])
+                cursor = conn.execute(
+                    f"DELETE FROM tracks WHERE file_path IN ({placeholders})",
+                    file_paths
+                )
+                conn.commit()
+                return cursor.rowcount
+        except Exception:
+            return 0
     
     def remove_track_by_path(self, file_path: str) -> bool:
         """Remove a track from catalog by file path"""
