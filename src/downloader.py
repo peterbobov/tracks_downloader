@@ -393,7 +393,11 @@ class SpotifyDownloader:
             return {"success": False, "error": "No session to resume"}
         
         self.current_session_id = session.session_id
-        
+
+        # Restore playlist name for file organization
+        if session.playlist_name:
+            self.file_manager.set_playlist_name(session.playlist_name)
+
         # Get pending tracks
         pending_tracks = self.progress_tracker.get_pending_tracks()
         retryable_tracks = self.progress_tracker.get_retryable_tracks()
