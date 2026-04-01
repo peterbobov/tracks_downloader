@@ -101,18 +101,18 @@ class LibraryCatalog:
                 )
             """)
 
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_artist ON tracks(artist)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_title ON tracks(title)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_playlist_source ON tracks(playlist_source)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_file_path ON tracks(file_path)')
-            conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_id ON tracks(spotify_id)')
-
             # Migration: add spotify_id column if upgrading from older schema
             cursor = conn.execute("PRAGMA table_info(tracks)")
             columns = [row[1] for row in cursor.fetchall()]
             if 'spotify_id' not in columns:
                 conn.execute('ALTER TABLE tracks ADD COLUMN spotify_id TEXT')
-                conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_id ON tracks(spotify_id)')
+
+            # Create indexes (after migration so spotify_id column exists)
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_artist ON tracks(artist)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_title ON tracks(title)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_playlist_source ON tracks(playlist_source)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_file_path ON tracks(file_path)')
+            conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_id ON tracks(spotify_id)')
 
             conn.commit()
     
