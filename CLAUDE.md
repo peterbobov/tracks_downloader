@@ -227,152 +227,77 @@ Settings → Privacy → Active Sessions
 ### Practical Security
 For local personal use, session security is equivalent to any authenticated desktop application. Main rule: treat `sessions/` folder like your `.ssh/` folder - keep it local and protected.
 
-## Quick Start Commands (v2.2.0 - Smart Library Management)
+## Quick Start Commands (v3.0.0)
 
 ```bash
-# Basic download (saves to music library with playlist organization)
-uv run uv run python run.py "https://open.spotify.com/playlist/xxxxx"
-
-# NEW! Download only missing tracks with smart detection
-uv run python run.py "https://open.spotify.com/playlist/xxxxx" --download-missing
-
-# Check which tracks are missing using catalog + folder scanning
-uv run python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
-
-# NEW! Catalog your existing music library for fast lookups
-uv run python run.py --catalog-library
+# Download missing tracks from playlist (default behavior)
+uv run python run.py "https://open.spotify.com/playlist/xxxxx"
 
 # Preview tracks without downloading
 uv run python run.py "https://open.spotify.com/playlist/xxxxx" --dry-run
 
-# Test with single track
-uv run python run.py "https://open.spotify.com/playlist/xxxxx" --limit 1
+# Control batch size (default: 3)
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --batch-size 5
 
-# Sequential processing (cleaner progress, still uses playlist folders)
+# Sequential processing
 uv run python run.py "https://open.spotify.com/playlist/xxxxx" --sequential
 
-# Chunked processing (recommended for large playlists)
-uv run python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 1 --limit 15 --batch-size 5
-uv run python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 16 --limit 15 --batch-size 5
+# Process a slice of the playlist
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 16 --limit 15
 
-# Debug mode for troubleshooting
+# Debug mode
 uv run python run.py "https://open.spotify.com/playlist/xxxxx" --debug
 
-# Check progress
+# Rebuild catalog from disk
+uv run python run.py catalog
+
+# Check session progress
 uv run python run.py status
 
-# Reset progress
+# Reset session
 uv run python run.py reset
 ```
 
-## Current Implementation Status (v2.2.0 - Smart Library Management)
+## Current Implementation Status (v3.0.0 - Clean Architecture & Smart Dedup)
 
-✅ **Smart Library Management Features:**
-- **Music Library Path**: New `MUSIC_LIBRARY_PATH` configuration for main music folder organization
-- **Consistent Playlist Organization**: All modes (sequential, parallel) save to `{music_library_path}/{playlist_name}/` structure
-- **SQLite Catalog Database**: Comprehensive track indexing with metadata extraction using mutagen library
-- **Smart Missing Track Detection**: Uses both catalog database (fast exact matches) and folder scanning (fuzzy matching) 
-- **Download Missing Tracks**: `--download-missing` flag with verbose preview and user approval
-- **Library Cataloging**: `--catalog-library` command to scan and index existing music collection
-- **Automatic Catalog Updates**: Downloaded tracks automatically added to catalog database
-- **Intelligent Track Lookup**: Prioritizes playlist-specific folders, falls back to library-wide search
-- **Enhanced Missing Analysis**: Shows tracks found by catalog vs folder scan, suggests catalog updates
-- **Metadata-Rich Storage**: Stores title, artist, album, duration, file format, and custom metadata in database
-- **Duplicate Prevention**: Smart handling of tracks appearing in multiple playlists
-- **File Organization Consistency**: Eliminates artist-based folders for cleaner playlist-based structure
+### Architecture
+- **Thin CLI** (`run.py`) — only parses args, delegates to orchestrator
+- **Orchestrator** (`src/downloader.py`) — owns full flow: fetch → catalog check → download → catalog new
+- **Catalog** (`src/catalog.py`) — SQLite with `spotify_id` as primary dedup key, `artist:title` hash fallback
+- **Telegram Client** (`src/telegram_client.py`) — bot communication and response matching
+- **File Manager** (`src/file_manager.py`) — file operations only, no catalog awareness
+- **Spotify API** (`src/spotify_api.py`) — playlist/album/track extraction with caching
 
-### New Configuration Options (v2.2.0):
-```bash
-# .env file additions
-MUSIC_LIBRARY_PATH=./music        # Main music library path (replaces scattered downloads)
-DOWNLOAD_FOLDER=./downloads       # Legacy parameter, kept for compatibility
-```
-
-### New CLI Commands (v2.2.0):
-```bash
-# Download only missing tracks with approval prompt
-uv run python run.py "playlist_url" --download-missing --batch-size 5 --sequential
-
-# Catalog existing music library for fast track lookups  
-uv run python run.py --catalog-library
-
-# Enhanced missing track detection with catalog + folder scanning
-uv run python run.py "playlist_url" --check-missing
-```
-
-### Workflow Examples (v2.2.0):
-```bash
-# 1. Initial setup - catalog existing music
-uv run python run.py --catalog-library
-# → Scans ./music/ recursively, extracts metadata, creates catalog.db
-
-# 2. Check what's missing from a new playlist
-uv run python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
-# → Fast catalog lookup + fallback folder scanning
-# → Shows: "Found in catalog: 85, Found by folder scan: 3, Missing: 12"
-
-# 3. Download only the missing tracks
-uv run python run.py "https://open.spotify.com/playlist/xxxxx" --download-missing
-# → Shows detailed preview of 12 missing tracks with metadata
-# → Asks for user approval: "Download 12 missing tracks? (yes/no):"
-# → Downloads only missing tracks to ./music/Playlist Name/
-
-# 4. All tracks now organized consistently in playlist folders
-# ./music/
-#   ├── Playlist Name/
-#   │   ├── Artist - Track1.flac
-#   │   ├── Artist - Track2.flac
-#   └── Another Playlist/
-#       ├── Artist - Track3.flac
-```
-
-## Previous Implementation Status (v2.1.4 - Enhanced UX & Missing Track Detection)
-
-✅ **Enhanced UX & Missing Track Detection Features:**
-- **@LosslessRobot Integration**: Fully optimized for [@LosslessRobot](https://t.me/LosslessRobot) Telegram bot
-- **Smart Track Matching**: Content-based matching eliminates race conditions in parallel processing
-- **Clean Terminal Output**: All system messages properly clear progress lines for clean display
-- **Missing Track Detection**: New `--check-missing` flag with 90% fuzzy matching and position numbers
-- **Duplicate Message Prevention**: Batch progress only shows when status actually changes
-- **Fixed Request Key Management**: Consistent key formats prevent delayed file orphaning
-- **Intelligent File Assignment**: Tracks get correct names regardless of bot response order
-- **Fuzzy String Matching**: Handles naming variations between Spotify and bot responses
-- **Memory Leak Fixed**: Resolved critical issue causing hangs after ~35 tracks
-- **Interactive Bot Support**: Complete button-based bot interaction workflow
-- **Request Management**: Enhanced queue limits (50→30) for better delayed file handling
-- **Security Hardened**: Protected against credential exposure with proper .gitignore
-- **Large File Downloads**: Successfully handles 40-50MB FLAC files with 5-minute timeouts
-- **Automatic Button Clicking**: Intelligently selects first option from bot responses
-- **Enhanced Progress Tracking**: Fixed premature completion and lost track issues
-- **Playlist-Based Organization**: Files organized by playlist name with clean filenames
-- **Flexible Processing Modes**: Sequential vs parallel processing options (parallel now safe!)
-- **Chunked Download Support**: Process large playlists in manageable segments
-- **True Batch Processing**: Waits for complete batch before proceeding
-- **Advanced Debug Mode**: Shows match scores, pending counts, and cleanup operations
-- **Large Playlist Support**: Can now process full 90+ track playlists reliably with correct naming
-- **Comprehensive CLI**: Advanced command-line options for all use cases
+### Key Features
+- **Download only missing tracks by default** — no special flags needed
+- **Spotify ID-based dedup** — reliable, no fuzzy matching needed for library tracks
+- **Self-healing catalog** — backfills Spotify IDs on `artist:title` hash matches
+- **Auto-cataloging** — downloaded tracks automatically indexed with Spotify ID
+- **WAL mode SQLite** — prevents database lock issues
+- **Unified filename sanitization** — single implementation in `src/utils.py`
+- **Default batch size 3** — matches bot reliability
 
 📁 **Project Structure:**
 ```
 spotify_downloader/
-├── src/                        # Modular components
+├── src/
 │   ├── __init__.py
 │   ├── spotify_api.py         # Spotify API interactions
 │   ├── telegram_client.py     # Telegram/Telethon handling
-│   ├── file_manager.py        # Download organization & catalog integration
-│   ├── catalog.py             # SQLite database for track indexing (NEW!)
+│   ├── file_manager.py        # Download organization
+│   ├── catalog.py             # SQLite track database with spotify_id
 │   ├── progress_tracker.py    # Session & progress management
-│   └── main.py               # Main orchestrator
-├── run.py                     # CLI entry point with new --download-missing
-├── catalog.db                 # SQLite track catalog database (created automatically)
-├── telethon_downloader.py     # Legacy monolithic version
+│   ├── downloader.py          # Main orchestrator
+│   ├── utils.py               # Shared utilities
+│   └── constants.py           # Configuration constants
+├── run.py                     # Thin CLI entry point
+├── catalog.db                 # SQLite track catalog (auto-created)
 ├── pyproject.toml             # Project config and dependencies (uv)
-├── .env.example              # Configuration template (NEW: MUSIC_LIBRARY_PATH)
-├── .gitignore                # Security exclusions
-└── README.md                 # User documentation
+├── .env.example               # Configuration template
+└── .gitignore                 # Security exclusions
 ```
 
-## Quick Start with Smart Library Management (v2.2.0)
+## Quick Start
 
 ```bash
 # Install dependencies
@@ -380,69 +305,19 @@ uv sync
 
 # Configure credentials in .env file
 cp .env.example .env
-# Edit .env with your API credentials AND set MUSIC_LIBRARY_PATH=./music
+# Edit .env with your API credentials and set MUSIC_LIBRARY_PATH=./music
 
-# NEW WORKFLOW: Smart library management
-# 1. Catalog existing music (one-time setup)
-uv run python run.py --catalog-library
+# Optional: catalog existing music (one-time setup)
+uv run python run.py catalog
 
-# 2. Check what's missing from a playlist
-uv run python run.py https://open.spotify.com/playlist/xxxxx --check-missing
+# Download missing tracks from a playlist
+uv run python run.py "https://open.spotify.com/playlist/xxxxx"
 
-# 3. Download only missing tracks with approval
-uv run python run.py https://open.spotify.com/playlist/xxxxx --download-missing
-
-# Traditional commands still work
-uv run python run.py --help                                          # Show help
-uv run python run.py https://open.spotify.com/playlist/xxxxx         # Download entire playlist
-uv run python run.py https://open.spotify.com/playlist/xxxxx --dry-run  # Preview tracks
-uv run python run.py status                                          # Check progress
-uv run python run.py report                                          # Generate report
+# Preview first
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --dry-run
 ```
 
-## New Features in v2.0.0
-
-### 1. **Modular Architecture**
-- Clean separation of concerns
-- Easy to test and maintain
-- Reusable components
-- Better error isolation
-
-### 2. **Enhanced Spotify Support**
-- Playlist extraction with pagination
-- Album support
-- Individual track support
-- Response caching for performance
-- Retry logic with exponential backoff
-
-### 3. **Advanced File Management**
-- Configurable organization (by artist/album/year)
-- Smart filename generation
-- Duplicate detection (file hash comparison)
-- Collision handling
-- File validation
-
-### 4. **Session Management**
-- Complete session persistence
-- Resume interrupted downloads
-- Track-level status tracking
-- Detailed progress reporting
-- Export capabilities
-
-### 5. **CLI Features**
-- Multiple commands (download, status, reset, report)
-- Flexible options (batch size, organization, output directory)
-- Dry run mode for testing
-- Comprehensive help system
-
-### 6. **Security Enhancements**
-- Protected session storage (0o700 permissions)
-- Environment-based configuration
-- No hardcoded credentials
-- Conservative rate limiting
-- Secure credential validation
-
-## Configuration Options
+## Configuration
 
 ### Environment Variables (.env)
 ```bash
@@ -457,229 +332,39 @@ TELEGRAM_PHONE_NUMBER=+1234567890
 EXTERNAL_BOT_USERNAME=@your_bot
 
 # Optional Settings
-DOWNLOAD_FOLDER=./downloads
+MUSIC_LIBRARY_PATH=./music
 DELAY_BETWEEN_REQUESTS=3.0
 MAX_RETRIES=3
-RESPONSE_TIMEOUT=60
+RESPONSE_TIMEOUT=600
 ```
 
-### Command Line Options
-- `--dry-run`: Preview without downloading
-- `--batch-size N`: Process N tracks at a time
-- `--no-resume`: Start fresh (ignore previous session)
-- `--organize-by [artist|album|none]`: File organization
-- `--year-folders`: Create year-based folders
-- `--output-dir DIR`: Custom download directory
+### CLI Options
+- `--dry-run`: Preview tracks without downloading
+- `--batch-size N`: Tracks per batch (default: 3)
+- `--limit N`: Maximum tracks to process
+- `--start-from N`: Start from track N (1-indexed)
+- `--sequential`: Process one track at a time
+- `--debug`: Enable debug output
 
-## Architecture Benefits
+## Version History
 
-1. **Maintainability**: Each module has a single responsibility
-2. **Testability**: Components can be tested in isolation
-3. **Extensibility**: Easy to add new features or storage backends
-4. **Reliability**: Better error handling and recovery
-5. **Performance**: Caching and optimized operations
-6. **Security**: Centralized credential management
-
-## Recent Updates (December 2025)
-
-### v2.1.4 - UI/UX Improvements & Missing Track Detection
-**Enhanced user experience with cleaner output and missing track detection**
-
-#### 🎨 **Clean Terminal Output**
-- **Progress Line Clearing**: All system messages now properly clear download progress lines before displaying
-- **Duplicate Message Prevention**: Batch progress messages no longer spam when status hasn't changed
-- **Consistent Formatting**: All status messages use consistent `_clear_print()` helper for clean display
-- **Improved Spacing**: Fixed messy overlapping text between progress indicators
-
-#### 🔍 **Missing Track Detection**
-- **New `--check-missing` Flag**: Check which tracks are missing from download folder using fuzzy matching
-- **90% Similarity Threshold**: Uses intelligent string matching to handle filename variations
-- **Position-Based Listing**: Shows playlist position numbers for easy identification of missing tracks
-- **Comprehensive Report**: Displays found vs missing tracks with detailed statistics and match confidence
-
-#### 🐛 **Critical Bug Fixes**
-- **Fixed Request Key Management**: Resolved inconsistent key formats (`msg_` vs `file_`) that caused delayed files to be orphaned
-- **Queue Size Optimization**: Increased pending request limits from 20→10 to 50→30 for better delayed file handling
-- **Consistent Key Format**: Button responses now maintain same key format throughout track lifecycle
-
-#### ✨ **Enhanced Features**
-```bash
-# Check missing tracks with new flag syntax
-uv run python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
-
-# Clean progress output - no more messy overlapping text
-Progress: 12345/67890 bytes (18.2%)
-✓ Downloaded: Track Name.flac (45,123,456 bytes)
-Batch progress: 3/5 tracks completed
-```
-
-#### 🔧 **Technical Improvements**
-- **Unified Progress Display**: Both telegram_client.py and main.py use `_clear_print()` helper
-- **Smart Duplicate Prevention**: Tracks last batch progress message to avoid redundant output
-- **Better File Matching**: Recursive .flac file scanning with fuzzy string matching
-- **Robust Error Handling**: Graceful handling of missing download folders and library dependencies
-
-### v2.1.3 - Smart Track Matching Revolution
-**Eliminated race conditions with intelligent content-based track matching**
-
-#### 🎯 **Smart Matching Algorithm**
-- **Content-Based Matching**: Replaced FIFO with fuzzy string matching using bot filenames and metadata
-- **Multi-Factor Scoring**: Analyzes filename, audio metadata (performer, title), and duration against Spotify data
-- **Confidence Thresholds**: 70% confidence required for smart match, falls back to FIFO for edge cases
-- **Race Condition Elimination**: Tracks correctly assigned regardless of bot response order
-
-#### 🔧 **Technical Implementation**
-- **Enhanced Metadata Extraction**: `_extract_filename_and_metadata()` extracts rich audio metadata from bot responses
-- **Similarity Scoring**: `_calculate_track_similarity()` with weighted algorithm (filename 60%, performer 40%, title 50%)
-- **Smart Request Matching**: `_find_best_matching_request()` finds highest scoring match above threshold
-- **Text Normalization**: Handles variations like "feat."/"featuring", "&"/"and" for better matching
-
-#### 🚀 **Benefits for Parallel Processing**
-- **No More Wrong Names**: Tracks get correct filenames even when bot responds out of order
-- **Maintains Speed**: Full parallel processing benefits without accuracy loss
-- **Handles Variations**: Works with slight naming differences between Spotify and bot
-- **Debug Visibility**: Shows match scores and decisions in debug mode
-
-#### 📊 **Matching Process**
-```
-Bot Response: "AADJA - Neuro Erotic.flac"
-Pending: ["AADJA - Neuro Erotic", "DJ Sodeyama - Miles Pt.2", ...]
-Scores: [100% AADJA match, 15% DJ Sodeyama match, ...]
-→ Smart match: 100% confidence ✓
-```
-
-### v2.1.2 - Critical Memory Leak Fix
-**Fixed critical memory leak causing downloads to stall after ~35 tracks**
-
-#### 🐛 **Critical Bug Fixes**
-- **Memory Leak Resolution**: Fixed pending request accumulation that caused bot to hang after processing ~35 tracks
-- **Request Cleanup**: Implemented proper cleanup in `_handle_file_response` method that was missing despite comments
-- **Orphaned Request Management**: Added `_cleanup_orphaned_requests()` to prevent request queue overflow
-- **Proactive Cleanup**: Now cleans up expired requests on every bot response, not just when checking count
-
-#### 🔧 **Enhanced Request Management**
-- **Better Request Keys**: Changed from simple message IDs to unique keys (`msg_{id}_{track_id}`) to prevent conflicts
-- **Debug Monitoring**: Enhanced debug mode to show pending request counts and cleanup operations
-- **Safeguard Limits**: Automatic cleanup when pending requests exceed 20 (keeps 10 most recent)
-- **Improved Stability**: Prevents indefinite hanging on large playlists by maintaining clean request queue
-
-### v2.1.1 - Security Hardening & Production Readiness
-**Critical security fixes and production-ready release for [@LosslessRobot](https://t.me/LosslessRobot)**
-
-#### 🔒 **Security Fixes**
-- **Credential Exposure Fix**: Removed accidentally tracked .cache file containing Spotify access token
-- **Enhanced .gitignore**: Added .cache to prevent future Spotify token exposure
-- **Credential Rotation**: Successfully rotated Spotify API credentials
-- **Public Release Ready**: Repository secured for public visibility
-
-#### 🤖 **Production Bot Integration**
-- **@LosslessRobot Support**: Fully tested and optimized for [@LosslessRobot](https://t.me/LosslessRobot) Telegram bot
-- **Real-World Testing**: Successfully processed 101-track playlists with 48MB+ FLAC downloads
-- **Reliable Button Automation**: Automatic first-option selection with robust error handling
-- **Interactive Flow Mastery**: Complete support for bot's URL → Buttons → File workflow
-
-### v2.1.0 - Interactive Bot Support & Enhanced Features
-**Major update with full interactive bot support and advanced download control**
-
-#### ✅ **Interactive Bot Flow Implementation**
-- **Button Response Handling**: Automatically detects and clicks first option when bot provides track choices
-- **"Nothing Found" Detection**: Gracefully handles bot's image responses when tracks aren't available
-- **Sequential Flow Support**: Complete support for bot's interactive workflow (URL → Buttons → File)
-
-#### ✅ **Advanced Download Management**
-- **Progress Tracking Fixes**: Resolved issues where downloads would complete session prematurely
-- **Timeout Handling**: 5-minute timeouts for large file downloads (40-50MB FLAC files)
-- **Download Verification**: File size and existence validation before marking tracks complete
-- **Lost Track Prevention**: Fixed issue where tracks could get stuck in "sent_to_bot" status
-
-#### ✅ **Flexible Processing Options**
-- **Sequential Mode**: `--sequential` for one-track-at-a-time processing (cleaner progress display)
-- **Parallel Mode**: Default fast processing for large playlists
-- **Chunked Downloads**: `--start-from N` and `--limit N` for processing playlists in manageable chunks
-- **True Batch Processing**: Waits for entire batch completion before starting next batch
-
-#### ✅ **Enhanced File Organization**
-- **Playlist-Based Folders**: Files organized in folders named after playlist (e.g., "Vol rise/")
-- **Clean Filenames**: "Artist - Track Name.flac" format with filesystem-safe character handling
-- **Collision Prevention**: Smart handling of duplicate filenames
-
-#### ✅ **Debug & Monitoring Features**
-- **Debug Mode**: `--debug` flag for detailed logging when troubleshooting
-- **Real-time Progress**: Live updates on batch completion and download progress
-- **Comprehensive Reporting**: Detailed session statistics and file organization
-
-### v2.0.1 - Security Fix & Dry Run Enhancement
-- **Security Incident**: Accidentally exposed Spotify credentials were removed
-- **Repository Reset**: Clean history with no exposed credentials
-- **Dry Run Mode**: Now works without Telegram credentials for testing
-- **Git Configuration**: Proper author attribution setup
-
-### Dry Run Testing
-Successfully tested with a 101-track playlist:
-```bash
-uv run python run.py "https://open.spotify.com/playlist/3i1D6J1DTyoGfaXMvz5M8E" --dry-run
-# Output: Found 101 tracks from "Vol rise" playlist
-```
-
-## Security Best Practices Learned
-
-1. **Never edit .env.example with real credentials**
-   - Always use placeholder values in example files
-   - Real credentials go only in .env (which is gitignored)
-
-2. **Quick Response to Credential Exposure**
-   - Immediately revoke exposed credentials
-   - Clean repository history or create fresh repository
-   - Update all affected credentials
-
-3. **Git Configuration**
-   ```bash
-   git config user.name "Your Name"
-   git config user.email "your-email@example.com"
-   ```
-
-## Recent Updates (December 2025)
-
-### v2.2.0 - Smart Library Management (LATEST)
-**Revolutionary update with music library cataloging and smart missing track detection**
-
-#### 🎯 **Major New Features**
-- **SQLite Catalog Database**: Complete track indexing with metadata extraction using mutagen library
-- **Smart Missing Track Detection**: Combines fast catalog lookup with fuzzy folder scanning
-- **Download Missing Tracks**: `--download-missing` flag with detailed preview and user approval
-- **Music Library Organization**: Consistent playlist-based folder structure for all processing modes
-- **Library Cataloging**: `--catalog-library` command to scan and index existing music collections
-- **Intelligent Track Matching**: Prioritizes playlist folders, falls back to library-wide search
-
-#### 🏗️ **Architecture Improvements**
-- **New catalog.py Module**: Comprehensive SQLite database management for track metadata
-- **Enhanced FileManager**: Automatic catalog integration with downloaded tracks
-- **Music Library Path**: New `MUSIC_LIBRARY_PATH` configuration replaces scattered downloads
-- **Consistent File Organization**: All modes save to `{music_library_path}/{playlist_name}/` structure
-
-#### 💡 **User Experience**
-- **One-Command Missing Downloads**: No manual track number calculation needed
-- **Verbose Download Previews**: Shows track details, duration, album info before download
-- **Smart Approval Prompts**: Clear information about what will be downloaded and where
-- **Catalog Update Suggestions**: Prompts to update catalog when tracks found by folder scan
-- **Enhanced Missing Analysis**: Shows tracks found by database vs folder scanning methods
-
-#### 🔧 **Technical Features**
-- **Metadata Extraction**: Supports FLAC, MP3, WAV, M4A, OGG with rich metadata storage
-- **Fuzzy String Matching**: 90% similarity threshold for filename variations
-- **Automatic Catalog Updates**: Downloaded tracks automatically indexed in database
-- **Duplicate Prevention**: Smart handling of tracks appearing in multiple playlists
-- **File Validation**: Ensures catalog entries point to existing files
-
-## Future Enhancements
-
-- [ ] Web UI for easier interaction
-- [ ] Multiple bot support  
-- [ ] Playlist monitoring for new tracks
-- [ ] Audio format conversion
-- [ ] Advanced metadata tagging with cover art
-- [ ] Cloud storage integration
-- [ ] Docker containerization
-- [ ] API rate limit visualization
-- [ ] Automatic credential validation on startup
-- [ ] Music library statistics dashboard
+### v3.0.0 (April 2026) - Clean Architecture & Smart Dedup
+- Deleted 3 legacy files, deleted `missing_tracks.py`
+- Renamed `main.py` → `downloader.py`
+- Added `spotify_id` column to catalog with WAL mode and migration
+- Catalog-first download flow: checks `spotify_id` → `artist:title` hash → download
+- Auto-backfills `spotify_id` on hash matches (self-healing catalog)
+- Auto-catalogs downloaded tracks with Spotify ID
+- Rewrote `run.py` as thin CLI (~160 lines, down from ~960)
+- Unified `sanitize_filename` into `src/utils.py`
+- Removed catalog awareness from `file_manager.py`
+- Default batch size changed from 10 to 3
+- Removed flags: `--check-missing`, `--download-missing`, `--catalog-library`, `--no-resume`, `--organize-by`, `--year-folders`, `--output-dir`
+- Removed `report` subcommand
+### v2.x (December 2025)
+- Smart track matching with fuzzy string matching
+- Interactive bot support with button clicking
+- Memory leak fixes, request management improvements
+- Playlist-based file organization
+- SQLite catalog database with metadata extraction
+- Missing track detection and download-missing workflow
