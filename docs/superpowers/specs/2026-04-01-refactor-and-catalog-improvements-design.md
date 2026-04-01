@@ -26,9 +26,6 @@ uv run python run.py <playlist_url>
 # Preview only, no download
 uv run python run.py <playlist_url> --dry-run
 
-# Force re-download everything (ignore catalog)
-uv run python run.py <playlist_url> --force
-
 # Control batch size (default: 3)
 uv run python run.py <playlist_url> --batch-size 5
 
@@ -56,6 +53,7 @@ uv run python run.py reset      # Reset session
 - `--organize-by` — always playlist-based
 - `--year-folders` — removed
 - `--output-dir` — use `MUSIC_LIBRARY_PATH` env var
+- `report` subcommand — unused, removed
 
 ## Module Architecture
 
@@ -97,6 +95,7 @@ Single source of truth for "do I have this track?"
 - Sanitize filenames (delegates to `utils.sanitize_filename()`)
 - Handle collisions (size/hash comparison, numeric suffixes)
 - No catalog awareness — orchestrator coordinates between catalog and file manager
+- `move_to_organized_location()` no longer auto-catalogs; orchestrator calls `catalog.add_track()` after successful move
 
 ### `src/spotify_api.py` — Unchanged
 
@@ -104,11 +103,11 @@ Already clean. Handles playlist/album/track extraction, caching, pagination.
 
 ### `src/progress_tracker.py` — Unchanged
 
-Already clean. Session persistence, track status tracking, resume support.
+Already clean. Session persistence, track status tracking, resume support. Tracks in-flight download state within a session. The catalog handles cross-session "do I have this?" checks; progress tracker handles within-session "did I already send this to the bot?".
 
 ### `src/utils.py` — Shared utilities
 
-- Single `sanitize_filename()` implementation (replaces 3 duplicates)
+- Single `sanitize_filename()` implementation (replaces duplicates in file_manager.py and spotify_api.py; `Track.filename_safe_name` updated to use this)
 - `normalize_text()` for string comparison
 - Other shared helpers
 
@@ -128,7 +127,7 @@ Already well-organized. Update `DEFAULT_BATCH_SIZE` from 10 to 3.
 ```sql
 CREATE TABLE tracks (
     id TEXT PRIMARY KEY,              -- MD5 of "artist:title"
-    spotify_id TEXT UNIQUE,           -- spotify:track:xxx (nullable for pre-existing)
+    spotify_id TEXT UNIQUE,           -- raw Spotify ID e.g. 4iV5W9uYEdYUVa79Axb7Rh (nullable for pre-existing)
     title TEXT,
     artist TEXT,
     album TEXT,
@@ -150,7 +149,12 @@ CREATE INDEX idx_file_path ON tracks(file_path);
 
 ### Migration
 
-On first run after upgrade, execute `ALTER TABLE tracks ADD COLUMN spotify_id TEXT UNIQUE` if the column doesn't exist. Existing rows get `NULL` for `spotify_id` — backfilled over time as playlists are processed.
+On first run after upgrade, if `spotify_id` column doesn't exist:
+
+1. `ALTER TABLE tracks ADD COLUMN spotify_id TEXT`
+2. `CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_id ON tracks(spotify_id)`
+
+SQLite doesn't support `UNIQUE` constraints in `ALTER TABLE ADD COLUMN`, so the index is created separately. Existing rows get `NULL` for `spotify_id` — backfilled over time as playlists are processed.
 
 ## Download Flow
 
@@ -178,7 +182,7 @@ run.py: parse args, call downloader.download(playlist_url)
 ## Error Handling
 
 - **Bot fails a track:** Mark failed in progress tracker, continue with batch. Failed tracks shown in final summary.
-- **Catalog DB locked:** SQLite WAL mode, retry with backoff.
+- **Catalog DB locked:** SQLite WAL mode (set `PRAGMA journal_mode=WAL` on DB init), retry with backoff.
 - **File already exists at target path:** Compare size/hash — skip if identical, add suffix if different.
 - **Stale catalog entry (file deleted from disk):** Remove entry during lookup, treat as missing.
 - **Large files (>50MB):** Use streaming hash instead of skipping comparison (fixes current bug).
