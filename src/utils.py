@@ -169,3 +169,33 @@ def truncate_string(text: str, max_length: int, suffix: str = "...") -> str:
         return text
 
     return text[:max_length - len(suffix)] + suffix
+
+
+def sanitize_filename(filename: str, max_length: int = 200) -> str:
+    """
+    Sanitize a string for use as a filename.
+
+    Removes invalid filesystem characters, collapses whitespace,
+    and truncates to max_length.
+
+    Args:
+        filename: The raw filename string
+        max_length: Maximum allowed length (default: 200)
+
+    Returns:
+        Filesystem-safe filename string
+    """
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        filename = filename.replace(char, '')
+
+    # Remove control characters
+    filename = re.sub(r'[\x00-\x1f\x7f]', '', filename)
+
+    # Collapse whitespace
+    filename = re.sub(r'\s+', ' ', filename).strip()
+
+    # Remove leading/trailing dots and spaces
+    filename = filename.strip('. ')
+
+    return filename[:max_length]
