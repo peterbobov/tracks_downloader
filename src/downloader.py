@@ -361,7 +361,7 @@ class SpotifyDownloader:
 
                 missing_tracks.append(track)
 
-            print(f"\n  Total: {len(tracks) + skipped if start_from > 1 else len(tracks) + skipped} tracks in playlist")
+            print(f"\n  Total: {len(tracks)} tracks in playlist")
             print(f"  Already in library: {skipped}")
             print(f"  To download: {len(missing_tracks)}")
 
