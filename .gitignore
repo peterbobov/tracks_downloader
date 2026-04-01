@@ -10,7 +10,7 @@ __pycache__/
 env/
 venv/
 ENV/
-.venv
+.venv/
 
 # Downloads
 downloads/

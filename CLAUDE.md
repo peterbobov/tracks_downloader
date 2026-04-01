@@ -8,7 +8,8 @@ Automate the process of downloading DJ tracks from Spotify playlists using an ex
 4. Organize them in a folder structure
 
 ## Requirements
-- Python 3.7+
+- Python 3.12+
+- uv (Python package manager)
 - Spotify Developer Account (for API access)
 - Telegram API credentials (api_id, api_hash from my.telegram.org)
 - Phone number for Telegram account verification
@@ -33,7 +34,7 @@ Since you're using an external bot (not your own), traditional Bot API approache
 
 ### 3. Install Dependencies
 ```bash
-pip install telethon spotipy python-dotenv
+uv sync
 ```
 
 ## Security Considerations
@@ -229,42 +230,39 @@ For local personal use, session security is equivalent to any authenticated desk
 ## Quick Start Commands (v2.2.0 - Smart Library Management)
 
 ```bash
-# Setup virtual environment
-source .venv/bin/activate
-
 # Basic download (saves to music library with playlist organization)
-python run.py "https://open.spotify.com/playlist/xxxxx"
+uv run uv run python run.py "https://open.spotify.com/playlist/xxxxx"
 
 # NEW! Download only missing tracks with smart detection
-python run.py "https://open.spotify.com/playlist/xxxxx" --download-missing
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --download-missing
 
 # Check which tracks are missing using catalog + folder scanning
-python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
 
 # NEW! Catalog your existing music library for fast lookups
-python run.py --catalog-library
+uv run python run.py --catalog-library
 
 # Preview tracks without downloading
-python run.py "https://open.spotify.com/playlist/xxxxx" --dry-run
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --dry-run
 
 # Test with single track
-python run.py "https://open.spotify.com/playlist/xxxxx" --limit 1
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --limit 1
 
 # Sequential processing (cleaner progress, still uses playlist folders)
-python run.py "https://open.spotify.com/playlist/xxxxx" --sequential
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --sequential
 
 # Chunked processing (recommended for large playlists)
-python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 1 --limit 15 --batch-size 5
-python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 16 --limit 15 --batch-size 5
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 1 --limit 15 --batch-size 5
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 16 --limit 15 --batch-size 5
 
 # Debug mode for troubleshooting
-python run.py "https://open.spotify.com/playlist/xxxxx" --debug
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --debug
 
 # Check progress
-python run.py status
+uv run python run.py status
 
 # Reset progress
-python run.py reset
+uv run python run.py reset
 ```
 
 ## Current Implementation Status (v2.2.0 - Smart Library Management)
@@ -293,28 +291,28 @@ DOWNLOAD_FOLDER=./downloads       # Legacy parameter, kept for compatibility
 ### New CLI Commands (v2.2.0):
 ```bash
 # Download only missing tracks with approval prompt
-python run.py "playlist_url" --download-missing --batch-size 5 --sequential
+uv run python run.py "playlist_url" --download-missing --batch-size 5 --sequential
 
 # Catalog existing music library for fast track lookups  
-python run.py --catalog-library
+uv run python run.py --catalog-library
 
 # Enhanced missing track detection with catalog + folder scanning
-python run.py "playlist_url" --check-missing
+uv run python run.py "playlist_url" --check-missing
 ```
 
 ### Workflow Examples (v2.2.0):
 ```bash
 # 1. Initial setup - catalog existing music
-python run.py --catalog-library
+uv run python run.py --catalog-library
 # → Scans ./music/ recursively, extracts metadata, creates catalog.db
 
 # 2. Check what's missing from a new playlist
-python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
 # → Fast catalog lookup + fallback folder scanning
 # → Shows: "Found in catalog: 85, Found by folder scan: 3, Missing: 12"
 
 # 3. Download only the missing tracks
-python run.py "https://open.spotify.com/playlist/xxxxx" --download-missing
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --download-missing
 # → Shows detailed preview of 12 missing tracks with metadata
 # → Asks for user approval: "Download 12 missing tracks? (yes/no):"
 # → Downloads only missing tracks to ./music/Playlist Name/
@@ -368,7 +366,7 @@ spotify_downloader/
 ├── run.py                     # CLI entry point with new --download-missing
 ├── catalog.db                 # SQLite track catalog database (created automatically)
 ├── telethon_downloader.py     # Legacy monolithic version
-├── requirements.txt           # Python dependencies (now includes mutagen)
+├── pyproject.toml             # Project config and dependencies (uv)
 ├── .env.example              # Configuration template (NEW: MUSIC_LIBRARY_PATH)
 ├── .gitignore                # Security exclusions
 └── README.md                 # User documentation
@@ -377,12 +375,8 @@ spotify_downloader/
 ## Quick Start with Smart Library Management (v2.2.0)
 
 ```bash
-# Setup virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies (now includes mutagen for metadata extraction)
-pip install -r requirements.txt
+# Install dependencies
+uv sync
 
 # Configure credentials in .env file
 cp .env.example .env
@@ -390,20 +384,20 @@ cp .env.example .env
 
 # NEW WORKFLOW: Smart library management
 # 1. Catalog existing music (one-time setup)
-python run.py --catalog-library
+uv run python run.py --catalog-library
 
 # 2. Check what's missing from a playlist
-python run.py https://open.spotify.com/playlist/xxxxx --check-missing
+uv run python run.py https://open.spotify.com/playlist/xxxxx --check-missing
 
 # 3. Download only missing tracks with approval
-python run.py https://open.spotify.com/playlist/xxxxx --download-missing
+uv run python run.py https://open.spotify.com/playlist/xxxxx --download-missing
 
 # Traditional commands still work
-python run.py --help                                          # Show help
-python run.py https://open.spotify.com/playlist/xxxxx         # Download entire playlist
-python run.py https://open.spotify.com/playlist/xxxxx --dry-run  # Preview tracks
-python run.py status                                          # Check progress
-python run.py report                                          # Generate report
+uv run python run.py --help                                          # Show help
+uv run python run.py https://open.spotify.com/playlist/xxxxx         # Download entire playlist
+uv run python run.py https://open.spotify.com/playlist/xxxxx --dry-run  # Preview tracks
+uv run python run.py status                                          # Check progress
+uv run python run.py report                                          # Generate report
 ```
 
 ## New Features in v2.0.0
@@ -511,7 +505,7 @@ RESPONSE_TIMEOUT=60
 #### ✨ **Enhanced Features**
 ```bash
 # Check missing tracks with new flag syntax
-python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --check-missing
 
 # Clean progress output - no more messy overlapping text
 Progress: 12345/67890 bytes (18.2%)
@@ -623,7 +617,7 @@ Scores: [100% AADJA match, 15% DJ Sodeyama match, ...]
 ### Dry Run Testing
 Successfully tested with a 101-track playlist:
 ```bash
-python run.py "https://open.spotify.com/playlist/3i1D6J1DTyoGfaXMvz5M8E" --dry-run
+uv run python run.py "https://open.spotify.com/playlist/3i1D6J1DTyoGfaXMvz5M8E" --dry-run
 # Output: Found 101 tracks from "Vol rise" playlist
 ```
 
