@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .spotify_api import Track
-from .catalog import LibraryCatalog, create_catalog
+from .utils import sanitize_filename as _sanitize_filename
 
 
 @dataclass
@@ -59,9 +59,6 @@ class FileManager:
         # Playlist organization
         self.current_playlist_name = None
         
-        # Catalog integration
-        self.catalog = None
-        
         # Statistics
         self.download_stats = {
             'total_downloaded': 0,
@@ -72,39 +69,12 @@ class FileManager:
     
     @staticmethod
     def sanitize_filename(filename: str, max_length: int = 200) -> str:
-        """Sanitize filename for safe file system use"""
-        # Remove or replace invalid characters
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            filename = filename.replace(char, '')
-        
-        # Replace multiple spaces with single space
-        filename = re.sub(r'\s+', ' ', filename)
-        
-        # Remove leading/trailing dots and spaces
-        filename = filename.strip('. ')
-        
-        # Limit length while preserving extension
-        if len(filename) > max_length:
-            name, ext = filename.rsplit('.', 1) if '.' in filename else (filename, '')
-            max_name_length = max_length - len(ext) - 1 if ext else max_length
-            filename = name[:max_name_length].rstrip()
-            if ext:
-                filename += f'.{ext}'
-        
-        # Ensure filename is not empty
-        if not filename or filename in ['.', '..']:
-            filename = 'untitled'
-        
-        return filename
+        """Sanitize filename. Delegates to utils.sanitize_filename."""
+        return _sanitize_filename(filename, max_length)
     
     def set_playlist_name(self, playlist_name: str):
         """Set the current playlist name for file organization"""
         self.current_playlist_name = playlist_name
-    
-    def enable_catalog(self, catalog_path: Optional[str] = None):
-        """Enable catalog integration"""
-        self.catalog = create_catalog(catalog_path)
     
     def get_organized_path(self, track: Track, filename: str) -> Path:
         """Get the organized file path based on configuration"""
@@ -249,14 +219,6 @@ class FileManager:
             file_size = final_path.stat().st_size
             self.download_stats['total_downloaded'] += 1
             self.download_stats['total_size_bytes'] += file_size
-            
-            # Add to catalog if enabled
-            if self.catalog:
-                try:
-                    self.catalog.add_track(final_path, self.current_playlist_name)
-                except Exception as e:
-                    # Don't fail the download if catalog fails
-                    print(f"Warning: Failed to add track to catalog: {e}")
             
             return DownloadResult(
                 success=True,
