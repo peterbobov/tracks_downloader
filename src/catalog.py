@@ -30,6 +30,7 @@ except ImportError:
 class CatalogTrack:
     """Track entry in the catalog database"""
     id: str  # MD5 hash of title + artist
+    spotify_id: Optional[str]  # Raw Spotify track ID
     title: str
     artist: str
     album: Optional[str]
@@ -78,11 +79,15 @@ class LibraryCatalog:
         self._init_database()
     
     def _init_database(self):
-        """Initialize the SQLite database with required tables"""
+        """Initialize the SQLite database schema with migration support"""
         with sqlite3.connect(self.catalog_path) as conn:
+            # Enable WAL mode for better concurrent access
+            conn.execute("PRAGMA journal_mode=WAL")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS tracks (
                     id TEXT PRIMARY KEY,
+                    spotify_id TEXT,
                     title TEXT NOT NULL,
                     artist TEXT NOT NULL,
                     album TEXT,
@@ -95,23 +100,20 @@ class LibraryCatalog:
                     metadata_json TEXT
                 )
             """)
-            
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_artist ON tracks(artist)
-            """)
-            
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_title ON tracks(title)
-            """)
-            
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_playlist_source ON tracks(playlist_source)
-            """)
-            
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_file_path ON tracks(file_path)
-            """)
-            
+
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_artist ON tracks(artist)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_title ON tracks(title)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_playlist_source ON tracks(playlist_source)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_file_path ON tracks(file_path)')
+            conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_id ON tracks(spotify_id)')
+
+            # Migration: add spotify_id column if upgrading from older schema
+            cursor = conn.execute("PRAGMA table_info(tracks)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'spotify_id' not in columns:
+                conn.execute('ALTER TABLE tracks ADD COLUMN spotify_id TEXT')
+                conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_id ON tracks(spotify_id)')
+
             conn.commit()
     
     @staticmethod
@@ -222,7 +224,8 @@ class LibraryCatalog:
         
         return existing_metadata
     
-    def add_track(self, file_path: Path, playlist_source: Optional[str] = None, 
+    def add_track(self, file_path: Path, playlist_source: Optional[str] = None,
+                  spotify_id: Optional[str] = None,
                   metadata_override: Optional[Dict] = None) -> bool:
         """Add a track to the catalog"""
         try:
@@ -242,6 +245,7 @@ class LibraryCatalog:
             # Prepare track data
             track_data = CatalogTrack(
                 id=track_id,
+                spotify_id=spotify_id,
                 title=metadata['title'],
                 artist=metadata['artist'],
                 album=metadata.get('album'),
@@ -257,15 +261,15 @@ class LibraryCatalog:
             # Insert into database
             with sqlite3.connect(self.catalog_path) as conn:
                 conn.execute("""
-                    INSERT OR REPLACE INTO tracks 
-                    (id, title, artist, album, file_path, playlist_source, date_added, 
+                    INSERT OR REPLACE INTO tracks
+                    (id, spotify_id, title, artist, album, file_path, playlist_source, date_added,
                      file_size, duration_seconds, file_format, metadata_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    track_data.id, track_data.title, track_data.artist, track_data.album,
-                    track_data.file_path, track_data.playlist_source, track_data.date_added,
-                    track_data.file_size, track_data.duration_seconds, track_data.file_format,
-                    track_data.metadata_json
+                    track_data.id, track_data.spotify_id, track_data.title, track_data.artist,
+                    track_data.album, track_data.file_path, track_data.playlist_source,
+                    track_data.date_added, track_data.file_size, track_data.duration_seconds,
+                    track_data.file_format, track_data.metadata_json
                 ))
                 conn.commit()
             
@@ -323,7 +327,58 @@ class LibraryCatalog:
                 return CatalogTrack(**dict(row))
         
         return None
-    
+
+    def find_track_by_spotify_id(self, spotify_id: str) -> Optional[CatalogTrack]:
+        """Find a track by its Spotify ID.
+
+        Args:
+            spotify_id: The Spotify track ID
+
+        Returns:
+            CatalogTrack if found and file exists, None otherwise
+        """
+        if not spotify_id:
+            return None
+
+        with sqlite3.connect(self.catalog_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                'SELECT * FROM tracks WHERE spotify_id = ?',
+                (spotify_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                track = CatalogTrack(**dict(row))
+                if Path(track.file_path).exists():
+                    return track
+                # Stale entry — file no longer exists
+                self.remove_track_by_path(track.file_path)
+        return None
+
+    def backfill_spotify_id(self, track_id: str, spotify_id: str) -> bool:
+        """Backfill spotify_id for an existing track matched by artist:title hash.
+
+        Args:
+            track_id: The MD5 hash track ID
+            spotify_id: The Spotify track ID to store
+
+        Returns:
+            True if updated, False otherwise
+        """
+        if not spotify_id:
+            return False
+
+        try:
+            with sqlite3.connect(self.catalog_path) as conn:
+                conn.execute(
+                    'UPDATE tracks SET spotify_id = ? WHERE id = ? AND spotify_id IS NULL',
+                    (spotify_id, track_id)
+                )
+                conn.commit()
+                return conn.total_changes > 0
+        except Exception:
+            return False
+
     def search_tracks(self, query: str, limit: int = 50) -> List[CatalogTrack]:
         """Search tracks by title or artist"""
         with sqlite3.connect(self.catalog_path) as conn:
