@@ -70,7 +70,7 @@ class BatchConstants:
     """Constants related to batch processing"""
 
     # Default batch size for processing tracks
-    DEFAULT_BATCH_SIZE: int = 10
+    DEFAULT_BATCH_SIZE: int = 3
 
     # Default batch timeout (seconds) - 5 minutes per batch
     # This is the time to wait before moving to next batch, not a hard failure
