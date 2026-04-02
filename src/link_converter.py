@@ -4,11 +4,13 @@ Link Converter Module
 
 Converts Spotify URLs to Tidal URLs using the song.link (Odesli) API.
 Caches results in the catalog database to avoid repeated API calls.
+
+Rate limit: 10 requests per minute (no API keys available).
 """
 
 import time
-import asyncio
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
+from urllib.parse import quote
 
 import requests
 
@@ -18,32 +20,28 @@ from .spotify_api import Track
 # song.link / Odesli API
 ODESLI_API_URL = "https://api.song.link/v1-alpha.1/links"
 
-# Rate limit: ~10 req/min → 6s between requests
-MIN_REQUEST_INTERVAL = 6.0
+# Rate limit: 10 req/min → 7s between requests (with safety margin)
+MIN_REQUEST_INTERVAL = 7.0
 
 
 class LinkConverter:
     """Converts Spotify URLs to Tidal URLs via song.link API with caching."""
 
-    def __init__(self, catalog=None, api_key: Optional[str] = None):
+    def __init__(self, catalog=None):
         """
         Args:
             catalog: LibraryCatalog instance for caching tidal URLs
-            api_key: Odesli API key for higher rate limits
         """
         self.catalog = catalog
-        self.api_key = api_key
         self._last_request_time = 0.0
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "SpotifyDownloader/3.0"})
 
     def _rate_limit(self):
         """Enforce minimum interval between API requests."""
-        # Paid API key allows faster requests
-        interval = 1.0 if self.api_key else MIN_REQUEST_INTERVAL
         elapsed = time.time() - self._last_request_time
-        if elapsed < interval:
-            time.sleep(interval - elapsed)
+        if elapsed < MIN_REQUEST_INTERVAL:
+            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
         self._last_request_time = time.time()
 
     def _fetch_tidal_url(self, spotify_url: str) -> Optional[str]:
@@ -58,13 +56,15 @@ class LinkConverter:
         """
         self._rate_limit()
 
+        params = {
+            "url": spotify_url,
+            "songIfSingle": "true",
+            "userCountry": "US",
+        }
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                params = {"url": spotify_url}
-                if self.api_key:
-                    params["key"] = self.api_key
-
                 resp = self._session.get(
                     ODESLI_API_URL,
                     params=params,
@@ -72,7 +72,7 @@ class LinkConverter:
                 )
 
                 if resp.status_code == 429:
-                    retry_after = int(resp.headers.get("Retry-After", 15))
+                    retry_after = int(resp.headers.get("Retry-After", 30))
                     print(f"  song.link rate limited, waiting {retry_after}s...")
                     time.sleep(retry_after)
                     self._last_request_time = time.time()
@@ -114,7 +114,7 @@ class LinkConverter:
         # Fetch from song.link API
         tidal_url = self._fetch_tidal_url(track.url)
 
-        # Cache result (even None gets cached as empty string to avoid re-fetching)
+        # Cache result
         if self.catalog and tidal_url:
             self.catalog.set_tidal_url(track.id, tidal_url)
 
@@ -129,7 +129,7 @@ class LinkConverter:
             debug: Show debug output
 
         Returns:
-            Dict mapping spotify track ID → tidal URL (or None)
+            Dict mapping spotify track ID -> tidal URL (or None)
         """
         results = {}
         cached = 0
@@ -152,13 +152,17 @@ class LinkConverter:
             return results
 
         if cached:
-            print(f"  {cached} Tidal links from cache, {len(uncached_tracks)} to look up...")
+            print(f"  {cached} from cache, {len(uncached_tracks)} to look up...")
+
+        if uncached_tracks:
+            eta_seconds = len(uncached_tracks) * MIN_REQUEST_INTERVAL
+            eta_minutes = eta_seconds / 60
+            print(f"  Looking up {len(uncached_tracks)} tracks (~{eta_minutes:.0f}min at {MIN_REQUEST_INTERVAL:.0f}s/track)...")
 
         # Second pass: fetch uncached from API
         for i, track in enumerate(uncached_tracks, 1):
             track_name = f"{track.artist_string} - {track.name}"
-            if debug:
-                print(f"  [{i}/{len(uncached_tracks)}] Looking up: {track_name}")
+            print(f"  [{i}/{len(uncached_tracks)}] {track_name}", end="")
 
             tidal_url = self._fetch_tidal_url(track.url)
 
@@ -167,13 +171,11 @@ class LinkConverter:
                 fetched += 1
                 if self.catalog:
                     self.catalog.set_tidal_url(track.id, tidal_url)
+                print(" -> Tidal OK")
             else:
                 results[track.id] = None
                 failed += 1
+                print(" -> will use Spotify")
 
-            # Progress every 10 tracks
-            if not debug and i % 10 == 0:
-                print(f"  Link conversion: {i}/{len(uncached_tracks)} done...")
-
-        print(f"  Tidal links: {cached} cached, {fetched} converted, {failed} not found (will use Spotify URL)")
+        print(f"  Tidal links: {cached} cached, {fetched} converted, {failed} not on Tidal")
         return results
