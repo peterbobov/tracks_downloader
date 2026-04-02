@@ -225,7 +225,10 @@ class SpotifyDownloader:
         self.catalog = LibraryCatalog()
 
         # Link converter for Spotify → Tidal URL conversion
-        self.link_converter = LinkConverter(catalog=self.catalog)
+        self.link_converter = LinkConverter(
+            catalog=self.catalog,
+            api_key=os.environ.get('ODESLI_API_KEY'),
+        )
 
         self.progress_tracker = create_progress_tracker(config.progress_file)
         

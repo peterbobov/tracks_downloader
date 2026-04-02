@@ -25,21 +25,25 @@ MIN_REQUEST_INTERVAL = 6.0
 class LinkConverter:
     """Converts Spotify URLs to Tidal URLs via song.link API with caching."""
 
-    def __init__(self, catalog=None):
+    def __init__(self, catalog=None, api_key: Optional[str] = None):
         """
         Args:
             catalog: LibraryCatalog instance for caching tidal URLs
+            api_key: Odesli API key for higher rate limits
         """
         self.catalog = catalog
+        self.api_key = api_key
         self._last_request_time = 0.0
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "SpotifyDownloader/3.0"})
 
     def _rate_limit(self):
         """Enforce minimum interval between API requests."""
+        # Paid API key allows faster requests
+        interval = 1.0 if self.api_key else MIN_REQUEST_INTERVAL
         elapsed = time.time() - self._last_request_time
-        if elapsed < MIN_REQUEST_INTERVAL:
-            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
         self._last_request_time = time.time()
 
     def _fetch_tidal_url(self, spotify_url: str) -> Optional[str]:
@@ -57,9 +61,13 @@ class LinkConverter:
         max_retries = 3
         for attempt in range(max_retries):
             try:
+                params = {"url": spotify_url}
+                if self.api_key:
+                    params["key"] = self.api_key
+
                 resp = self._session.get(
                     ODESLI_API_URL,
-                    params={"url": spotify_url},
+                    params=params,
                     timeout=15,
                 )
 
