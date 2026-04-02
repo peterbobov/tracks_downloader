@@ -292,7 +292,8 @@ class SpotifyDownloader:
                 print(f"{Fore.YELLOW}Found resumable session:{Style.RESET_ALL}")
                 print(f"  Playlist: {resume_info['playlist_name']}")
                 print(f"  Progress: {resume_info['completed_count']}/{resume_info['total_tracks']} completed")
-                print(f"  Pending: {resume_info['pending_count']} tracks")
+                remaining = resume_info['pending_count'] + resume_info['failed_count']
+                print(f"  Remaining: {remaining} tracks ({resume_info['pending_count']} pending, {resume_info['failed_count']} failed)")
                 
                 if input(f"{Fore.CYAN}Resume previous session? (y/n): {Style.RESET_ALL}").lower() == 'y':
                     return await self._resume_session(dry_run, batch_size, limit, sequential, start_from)
@@ -432,10 +433,19 @@ class SpotifyDownloader:
         if session.playlist_name:
             self.file_manager.set_playlist_name(session.playlist_name)
 
-        # Get pending tracks
+        # Reset stuck tracks (sent_to_bot/downloading from crashed session)
+        stuck_statuses = [TrackStatus.SENT_TO_BOT, TrackStatus.DOWNLOADING]
+        for status in stuck_statuses:
+            stuck = self.progress_tracker.get_tracks_by_status(status)
+            for track in stuck:
+                self.progress_tracker.update_track_status(track.track_id, TrackStatus.PENDING)
+            if stuck:
+                print(f"  Reset {len(stuck)} stuck tracks ({status.value} → pending)")
+
+        # Get all processable tracks
         pending_tracks = self.progress_tracker.get_pending_tracks()
         retryable_tracks = self.progress_tracker.get_retryable_tracks()
-        
+
         all_processable = pending_tracks + retryable_tracks
         
         # Apply limit if specified
