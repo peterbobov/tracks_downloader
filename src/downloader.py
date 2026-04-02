@@ -375,13 +375,35 @@ class SpotifyDownloader:
 
             tracks = missing_tracks
 
-            # Convert Spotify URLs to Tidal URLs (preferred by bot)
+            # Convert Spotify URLs to Tidal URLs (required by bot)
+            from .link_converter import NO_TIDAL_MATCH
             print(f"\n{Fore.CYAN}Converting links to Tidal...{Style.RESET_ALL}")
             tidal_urls = self.link_converter.convert_tracks(tracks, debug=self.debug_mode)
+
+            # Only keep tracks with Tidal URLs
+            ready_tracks = []
+            skipped_no_tidal = 0
+            skipped_api_error = 0
             for track in tracks:
                 tidal_url = tidal_urls.get(track.id)
-                if tidal_url:
+                if tidal_url and tidal_url != NO_TIDAL_MATCH:
                     track.url = tidal_url
+                    ready_tracks.append(track)
+                elif tidal_url == NO_TIDAL_MATCH:
+                    skipped_no_tidal += 1
+                else:
+                    skipped_api_error += 1
+
+            if skipped_no_tidal:
+                print(f"  {Fore.YELLOW}Skipping {skipped_no_tidal} tracks not available on Tidal{Style.RESET_ALL}")
+            if skipped_api_error:
+                print(f"  {Fore.YELLOW}Skipping {skipped_api_error} tracks due to API errors (will retry next run){Style.RESET_ALL}")
+
+            if not ready_tracks:
+                print(f"\n{Fore.YELLOW}  No tracks ready to download.{Style.RESET_ALL}")
+                return {"success": True, "total": len(tracks), "skipped": skipped, "downloaded": 0}
+
+            tracks = ready_tracks
 
             # Security confirmation
             if not self._confirm_download(len(tracks), batch_size):

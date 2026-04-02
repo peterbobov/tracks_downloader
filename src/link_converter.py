@@ -10,7 +10,6 @@ Rate limit: 10 requests per minute (no API keys available).
 
 import time
 from typing import Optional, Dict, List
-from urllib.parse import quote
 
 import requests
 
@@ -22,6 +21,9 @@ ODESLI_API_URL = "https://api.song.link/v1-alpha.1/links"
 
 # Rate limit: 10 req/min → 7s between requests (with safety margin)
 MIN_REQUEST_INTERVAL = 7.0
+
+# Sentinel: API responded 200 but no Tidal match exists
+NO_TIDAL_MATCH = "__NO_TIDAL__"
 
 
 class LinkConverter:
@@ -52,7 +54,9 @@ class LinkConverter:
             spotify_url: Spotify track URL
 
         Returns:
-            Tidal URL if found, None otherwise
+            Tidal URL string if found,
+            NO_TIDAL_MATCH if API confirmed no Tidal match,
+            None if API error (should retry later)
         """
         self._rate_limit()
 
@@ -79,11 +83,18 @@ class LinkConverter:
                     continue
 
                 if resp.status_code != 200:
+                    # API error — don't know if Tidal match exists
                     return None
 
                 data = resp.json()
                 tidal_data = data.get("linksByPlatform", {}).get("tidal", {})
-                return tidal_data.get("url")
+                tidal_url = tidal_data.get("url")
+
+                if tidal_url:
+                    return tidal_url
+
+                # API returned 200 but no Tidal link — confirmed miss
+                return NO_TIDAL_MATCH
 
             except requests.exceptions.Timeout:
                 if attempt < max_retries - 1:
@@ -160,22 +171,30 @@ class LinkConverter:
             print(f"  Looking up {len(uncached_tracks)} tracks (~{eta_minutes:.0f}min at {MIN_REQUEST_INTERVAL:.0f}s/track)...")
 
         # Second pass: fetch uncached from API
+        api_errors = 0
         for i, track in enumerate(uncached_tracks, 1):
             track_name = f"{track.artist_string} - {track.name}"
             print(f"  [{i}/{len(uncached_tracks)}] {track_name}", end="")
 
-            tidal_url = self._fetch_tidal_url(track.url)
+            result = self._fetch_tidal_url(track.url)
 
-            if tidal_url:
-                results[track.id] = tidal_url
+            if result and result != NO_TIDAL_MATCH:
+                # Got a Tidal URL
+                results[track.id] = result
                 fetched += 1
                 if self.catalog:
-                    self.catalog.set_tidal_url(track.id, tidal_url)
+                    self.catalog.set_tidal_url(track.id, result)
                 print(" -> Tidal OK")
-            else:
-                results[track.id] = None
+            elif result == NO_TIDAL_MATCH:
+                # API confirmed: not on Tidal
+                results[track.id] = NO_TIDAL_MATCH
                 failed += 1
-                print(" -> will use Spotify")
+                print(" -> not on Tidal (will skip)")
+            else:
+                # API error — don't send this track, retry next run
+                results[track.id] = None
+                api_errors += 1
+                print(" -> API error (will retry next run)")
 
-        print(f"  Tidal links: {cached} cached, {fetched} converted, {failed} not on Tidal")
+        print(f"  Tidal links: {cached} cached, {fetched} converted, {failed} not on Tidal, {api_errors} API errors")
         return results
