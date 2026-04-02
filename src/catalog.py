@@ -107,6 +107,15 @@ class LibraryCatalog:
             if 'spotify_id' not in columns:
                 conn.execute('ALTER TABLE tracks ADD COLUMN spotify_id TEXT')
 
+            # Link cache table — stores Tidal URLs keyed by Spotify track ID
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS link_cache (
+                    spotify_id TEXT PRIMARY KEY,
+                    tidal_url TEXT,
+                    cached_at TEXT NOT NULL
+                )
+            """)
+
             # Create indexes (after migration so spotify_id column exists)
             conn.execute('CREATE INDEX IF NOT EXISTS idx_artist ON tracks(artist)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_title ON tracks(title)')
@@ -376,6 +385,44 @@ class LibraryCatalog:
                 )
                 conn.commit()
                 return conn.total_changes > 0
+        except Exception:
+            return False
+
+    def get_tidal_url(self, spotify_id: str) -> Optional[str]:
+        """Get cached Tidal URL for a Spotify track ID.
+
+        Returns:
+            Tidal URL string if cached, None otherwise
+        """
+        if not spotify_id:
+            return None
+        try:
+            with sqlite3.connect(self.catalog_path) as conn:
+                cursor = conn.execute(
+                    'SELECT tidal_url FROM link_cache WHERE spotify_id = ?',
+                    (spotify_id,)
+                )
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
+
+    def set_tidal_url(self, spotify_id: str, tidal_url: str) -> bool:
+        """Cache a Tidal URL for a Spotify track ID.
+
+        Returns:
+            True if stored, False otherwise
+        """
+        if not spotify_id or not tidal_url:
+            return False
+        try:
+            with sqlite3.connect(self.catalog_path) as conn:
+                conn.execute(
+                    'INSERT OR REPLACE INTO link_cache (spotify_id, tidal_url, cached_at) VALUES (?, ?, ?)',
+                    (spotify_id, tidal_url, datetime.now().isoformat())
+                )
+                conn.commit()
+                return True
         except Exception:
             return False
 

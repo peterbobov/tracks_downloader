@@ -27,6 +27,7 @@ from .telegram_client import TelegramMessenger, TelegramConfig, create_telegram_
 from .file_manager import FileManager, FileConfig, create_file_manager
 from .progress_tracker import ProgressTracker, TrackStatus, create_progress_tracker
 from .catalog import LibraryCatalog
+from .link_converter import LinkConverter
 
 # Initialize colorama
 init()
@@ -223,6 +224,9 @@ class SpotifyDownloader:
         # Catalog for track dedup
         self.catalog = LibraryCatalog()
 
+        # Link converter for Spotify → Tidal URL conversion
+        self.link_converter = LinkConverter(catalog=self.catalog)
+
         self.progress_tracker = create_progress_tracker(config.progress_file)
         
         # Runtime components (initialized during operation)
@@ -370,6 +374,14 @@ class SpotifyDownloader:
                 return {"success": True, "total": len(tracks), "skipped": skipped, "downloaded": 0}
 
             tracks = missing_tracks
+
+            # Convert Spotify URLs to Tidal URLs (preferred by bot)
+            print(f"\n{Fore.CYAN}Converting links to Tidal...{Style.RESET_ALL}")
+            tidal_urls = self.link_converter.convert_tracks(tracks, debug=self.debug_mode)
+            for track in tracks:
+                tidal_url = tidal_urls.get(track.id)
+                if tidal_url:
+                    track.url = tidal_url
 
             # Security confirmation
             if not self._confirm_download(len(tracks), batch_size):
