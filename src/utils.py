@@ -57,6 +57,36 @@ def normalize_text(text: str) -> str:
     return result.strip()
 
 
+def strip_bot_artifacts(filename: str) -> str:
+    """
+    Strip bot-added artifacts from filenames for better matching.
+
+    Bot filenames follow patterns like:
+    - 5_Love_Nation_Everything_4_U_Remix_Don_Carlos_Edit_2N3PYW.flac
+    - 1-Tiga-Sunglasses-at-Night--Raxon-Remix--9R64DO.flac
+    - 20-Aleksi-Per-l--UK74R1512110--Mixed--2DMTIB.flac
+
+    Strips: leading track number + separator, trailing hash code.
+    """
+    # Remove file extension
+    result = re.sub(r'\.(flac|mp3|wav|m4a|ogg)$', '', filename, flags=re.IGNORECASE)
+
+    # Remove leading track number + separator (e.g., "5_", "1-", "20-")
+    result = re.sub(r'^\d{1,3}[-_]', '', result)
+
+    # Remove trailing hash code (5-6 alphanumeric chars after last separator)
+    # Matches patterns like _2N3PYW, --9R64DO, _QOOD21, -6SZ50C
+    result = re.sub(r'[-_]{1,2}[A-Z0-9]{5,7}$', '', result)
+
+    # Replace separators with spaces for matching
+    result = result.replace('_', ' ').replace('-', ' ')
+
+    # Collapse multiple spaces
+    result = re.sub(r'\s+', ' ', result).strip()
+
+    return result
+
+
 def normalize_filename(filename: str) -> str:
     """
     Normalize filename for duplicate detection and comparison.

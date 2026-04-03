@@ -21,7 +21,7 @@ from fuzzywuzzy import fuzz
 from telethon import TelegramClient, events
 
 from .constants import TelegramConstants, MatchingWeights
-from .utils import clear_print, normalize_text
+from .utils import clear_print, normalize_text, strip_bot_artifacts
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from telethon.tl.types import (
     DocumentAttributeFilename, 
@@ -400,7 +400,9 @@ class TelegramMessenger:
 
         # Score 1: Filename vs full track name (most reliable)
         if bot_filename:
-            bot_filename_clean = normalize_text(bot_filename.replace('.flac', '').replace('.mp3', ''))
+            # Strip bot-added artifacts (track number prefix, hash suffix) before matching
+            bot_filename_stripped = strip_bot_artifacts(bot_filename)
+            bot_filename_clean = normalize_text(bot_filename_stripped)
             filename_score = fuzz.token_sort_ratio(bot_filename_clean, spotify_full)
             scores.append(('filename', filename_score, MatchingWeights.FILENAME_WEIGHT))
 
