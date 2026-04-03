@@ -614,69 +614,55 @@ class SpotifyDownloader:
                     if flushed > 0:
                         print(f"{Fore.YELLOW}Cleared {flushed} unmatched request(s) from batch {batch_num}{Style.RESET_ALL}")
         
-        # Wait for final responses and downloads to complete
-        self._clear_print(f"{Fore.YELLOW}Waiting for remaining bot responses...{Style.RESET_ALL}")
+        # Wait for active downloads to finish; skip tracks the bot never responded to
+        self._clear_print(f"{Fore.YELLOW}Waiting for remaining downloads...{Style.RESET_ALL}")
 
-        # Wait longer and check for downloads more frequently
-        total_wait_time = 0
-        max_wait_time = self.config.response_timeout
+        last_activity_time = time.time()
+        prev_downloading = 0
+        prev_completed = 0
 
-        # For single track downloads, use shorter but reasonable timeout
-        session = self.progress_tracker.current_session
-        if session and len(session.tracks) == 1:
-            max_wait_time = max(self.config.response_timeout, 900)  # At least 15 minutes for single track
-
-        while total_wait_time < max_wait_time:
-            # Wait for responses (async call)
-            pending_responses = await self.telegram.get_pending_count()
-
-            # Check for incomplete tracks (sent_to_bot, downloading, etc.)
+        while True:
             session = self.progress_tracker.current_session
-            incomplete_tracks = []
-            if session:
-                incomplete_tracks = [
-                    track for track in session.tracks.values()
-                    if track.status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]
-                ]
-
-            if pending_responses == 0 and len(incomplete_tracks) == 0:
-                print(f"{Fore.GREEN}All responses and downloads completed{Style.RESET_ALL}")
+            if not session:
                 break
 
-            # If all tracks are in final states but we still have pending responses, clean them up
-            if len(incomplete_tracks) == 0 and pending_responses > 0:
-                if self.debug_mode:
-                    print(f"{Fore.MAGENTA}DEBUG: All tracks finished but {pending_responses} pending responses remain - cleaning up{Style.RESET_ALL}")
-                # Force cleanup of orphaned requests (using async lock)
+            incomplete_tracks = [
+                t for t in session.tracks.values()
+                if t.status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]
+            ]
+            downloading = [t for t in incomplete_tracks if t.status == TrackStatus.DOWNLOADING]
+            waiting_for_bot = [t for t in incomplete_tracks if t.status == TrackStatus.SENT_TO_BOT]
+            completed = len(session.tracks) - len(incomplete_tracks)
+
+            # All done
+            if not incomplete_tracks:
+                print(f"{Fore.GREEN}All downloads completed{Style.RESET_ALL}")
+                break
+
+            # Track activity — reset timer when something changes
+            if len(downloading) != prev_downloading or completed != prev_completed:
+                last_activity_time = time.time()
+                prev_downloading = len(downloading)
+                prev_completed = completed
+
+            # Active downloads — keep waiting
+            if downloading:
+                self._clear_print(f"{Fore.YELLOW}Waiting for {len(downloading)} download(s) to complete...{Style.RESET_ALL}")
+            # Only stuck tracks remaining — give 60s then move on
+            elif waiting_for_bot and (time.time() - last_activity_time) >= 60:
+                print(f"{Fore.YELLOW}{len(waiting_for_bot)} track(s) never received from bot — finishing session{Style.RESET_ALL}")
+                break
+            elif waiting_for_bot:
+                self._clear_print(f"{Fore.YELLOW}Waiting for {len(waiting_for_bot)} bot response(s)...{Style.RESET_ALL}")
+
+            # Clean up orphaned pending requests
+            pending = await self.telegram.get_pending_count()
+            if not incomplete_tracks and pending > 0:
                 async with self.telegram._pending_lock:
-                    self.telegram._cleanup_orphaned_requests_unlocked()
-                pending_responses = await self.telegram.get_pending_count()
-
-                # If we still have pending responses after cleanup, force exit
-                if pending_responses > 0:
-                    if self.debug_mode:
-                        print(f"{Fore.MAGENTA}DEBUG: Still {pending_responses} pending after cleanup - force breaking{Style.RESET_ALL}")
-                    print(f"{Fore.YELLOW}All tracks processed, ending session{Style.RESET_ALL}")
-                    break
-
-            if pending_responses > 0:
-                self._clear_print(f"{Fore.YELLOW}Waiting for {pending_responses} pending responses...{Style.RESET_ALL}")
-
-            if len(incomplete_tracks) > 0:
-                # Show what we're waiting for
-                waiting_for_bot = len([t for t in incomplete_tracks if t.status == TrackStatus.SENT_TO_BOT])
-                downloading = len([t for t in incomplete_tracks if t.status == TrackStatus.DOWNLOADING])
-
-                if waiting_for_bot > 0:
-                    self._clear_print(f"{Fore.YELLOW}Waiting for {waiting_for_bot} bot responses...{Style.RESET_ALL}")
-                if downloading > 0:
-                    self._clear_print(f"{Fore.YELLOW}Waiting for {downloading} downloads to complete...{Style.RESET_ALL}")
+                    self.telegram.pending_responses.clear()
+                break
 
             await asyncio.sleep(5)
-            total_wait_time += 5
-
-        if total_wait_time >= max_wait_time:
-            print(f"{Fore.RED}Timeout reached after {max_wait_time} seconds{Style.RESET_ALL}")
         
         # Complete session
         self.progress_tracker.complete_session()

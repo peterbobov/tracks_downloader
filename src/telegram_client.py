@@ -553,13 +553,7 @@ class TelegramMessenger:
             del self.pending_responses[best_request_id]
             return best_match
 
-        # Only fall back to FIFO if there's exactly 1 pending request (no ambiguity)
-        if len(self.pending_responses) == 1:
-            if self.debug_mode:
-                print(f"{Fore.YELLOW}→ Single pending request, using FIFO fallback (best score: {best_score:.1f}%){Style.RESET_ALL}")
-            return self._find_matching_request_unlocked()
-
-        # Multiple pending requests with low confidence — don't guess
+        # No confident match — reject the file
         if self.debug_mode:
             print(f"{Fore.YELLOW}→ No confident match among {len(self.pending_responses)} pending requests "
                   f"(best score: {best_score:.1f}%). Skipping file.{Style.RESET_ALL}")
