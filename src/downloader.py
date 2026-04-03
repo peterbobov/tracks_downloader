@@ -605,14 +605,7 @@ class SpotifyDownloader:
                 # Wait for ALL tracks in this batch to complete before next batch
                 if batch_end < total_tracks:
                     self._clear_print(f"{Fore.YELLOW}Waiting for batch to complete before processing next batch...{Style.RESET_ALL}")
-                    # Dynamic timeout based on batch size - at least 1 minute per track
-                    # This ensures large files have enough time to download
-                    batch_timeout = max(
-                        BatchConstants.DEFAULT_BATCH_TIMEOUT,
-                        len(batch) * BatchConstants.MIN_TIMEOUT_PER_TRACK
-                    )
-                    batch_timeout = min(batch_timeout, BatchConstants.MAX_BATCH_TIMEOUT)
-                    await self._wait_for_batch_completion(batch, timeout=batch_timeout)
+                    await self._wait_for_batch_completion(batch)
 
                     # Flush any stale pending requests from this batch to prevent
                     # them from polluting the next batch's response matching
@@ -725,12 +718,14 @@ class SpotifyDownloader:
         """
         Wait for all tracks in a batch to complete (success, fail, or not found).
 
-        Early exit: if all remaining tracks are stuck at SENT_TO_BOT (no file
-        arrived) for 30s after the last track completed, skip to next batch.
+        Exit conditions (checked every 5s):
+        - All tracks completed or failed
+        - 60s with no response at all from bot (all stuck at SENT_TO_BOT)
+        - 30s after last completion, remaining tracks still at SENT_TO_BOT
+        - Active downloads keep the batch alive indefinitely (no hard timeout)
 
-        Note: On timeout, tracks are NOT marked as failed - they continue processing
-        in the background and can still complete in subsequent batches. This prevents
-        losing tracks that are just slow to download.
+        Note: On exit, incomplete tracks are NOT marked as failed - they continue
+        processing in the background and can still complete in subsequent batches.
         """
         start_time = time.time()
         batch_track_ids = [track.id for track in batch_tracks]
@@ -741,7 +736,7 @@ class SpotifyDownloader:
         if self.debug_mode:
             print(f"{Fore.MAGENTA}DEBUG: Waiting for batch with track IDs: {batch_track_ids}{Style.RESET_ALL}")
 
-        while (time.time() - start_time) < timeout:
+        while True:
             session = self.progress_tracker.current_session
             if not session:
                 break
@@ -819,10 +814,8 @@ class SpotifyDownloader:
                     final_incomplete.append(track_id)
 
             if final_incomplete:
-                elapsed_time = time.time() - start_time
                 # Only show warning, don't mark as failed - let them continue processing
-                print(f"{Fore.YELLOW}Batch timeout after {elapsed_time:.0f}s: {len(final_incomplete)} tracks still processing{Style.RESET_ALL}")
-                print(f"{Fore.YELLOW}  These tracks will continue downloading in background...{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}  {len(final_incomplete)} track(s) will continue in background...{Style.RESET_ALL}")
 
                 if self.debug_mode:
                     # Show which tracks are still processing
