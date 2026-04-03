@@ -211,22 +211,15 @@ class SpotifyExtractor:
         )
     
     def get_playlist_tracks(self, playlist_url: str) -> List[Track]:
-        """Get all tracks from a Spotify playlist"""
+        """Get all tracks from a Spotify playlist (always fetches fresh)"""
         playlist_id = self.extract_spotify_id(playlist_url, 'playlist')
-        
-        # Check cache first
-        cache_key = f"playlist_{playlist_id}"
-        if self.cache:
-            cached_data = self.cache.get(cache_key)
-            if cached_data:
-                return [Track(**track_data) for track_data in cached_data]
-        
+
         tracks = []
         offset = 0
         limit = 100
-        
+
         print(f"Fetching playlist tracks from Spotify API...")
-        
+
         while True:
             try:
                 results = self._make_request(
@@ -235,26 +228,21 @@ class SpotifyExtractor:
                     offset=offset,
                     limit=limit
                 )
-                
+
                 for item in results['items']:
                     if item['track'] and item['track']['id']:
                         track = self._track_from_api_data(item['track'])
                         tracks.append(track)
-                
+
                 if results['next'] is None:
                     break
-                
+
                 offset += limit
-                
+
             except Exception as e:
                 print(f"Error fetching playlist tracks: {e}")
                 break
-        
-        # Cache the results
-        if self.cache and tracks:
-            track_data = [track.__dict__ for track in tracks]
-            self.cache.set(cache_key, track_data)
-        
+
         print(f"Found {len(tracks)} tracks in playlist")
         return tracks
     
