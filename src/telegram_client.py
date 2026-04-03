@@ -247,17 +247,50 @@ class TelegramMessenger:
                   f"(best: {best_score:.0f}%){Style.RESET_ALL}")
         return None
 
+    def _find_request_by_reply_id_unlocked(self, reply_to_msg_id: int) -> Optional[PendingRequest]:
+        """
+        Find pending request by the message ID it replies to.
+
+        The bot replies to our original message, so we can match exactly
+        by checking which pending request has that message_id.
+
+        Note: Must be called while holding self._pending_lock.
+        """
+        for request_id, request in self.pending_responses.items():
+            if request.message_id == reply_to_msg_id:
+                del self.pending_responses[request_id]
+                return request
+        return None
+
     async def _handle_button_response(self, event):
         """Handle button responses from bot (track options)"""
-        # Extract text from buttons/message for smart matching
-        button_text = self._extract_button_text(event)
+        # Check if this is a confirmation/download message (photo + buttons)
+        # These should not consume pending requests from track selection
+        if isinstance(event.message.media, MessageMediaPhoto):
+            await self._handle_download_confirmation(event)
+            return
 
-        # Find matching pending request using content-based matching (thread-safe)
+        # Try matching by reply-to message ID first (most reliable)
+        reply_to_msg_id = None
+        if event.message.reply_to:
+            reply_to_msg_id = event.message.reply_to.reply_to_msg_id
+
         async with self._pending_lock:
-            if button_text and len(self.pending_responses) > 1:
-                matched_request = self._find_best_matching_request_by_text_unlocked(button_text)
-            else:
-                matched_request = self._find_matching_request_unlocked()
+            matched_request = None
+
+            # Method 1: Match by reply-to message ID (exact)
+            if reply_to_msg_id:
+                matched_request = self._find_request_by_reply_id_unlocked(reply_to_msg_id)
+                if matched_request and self.debug_mode:
+                    print(f"{Fore.MAGENTA}DEBUG: Matched by reply_to_msg_id {reply_to_msg_id}{Style.RESET_ALL}")
+
+            # Method 2: Content-based matching (fallback)
+            if not matched_request:
+                button_text = self._extract_button_text(event)
+                if button_text and len(self.pending_responses) > 1:
+                    matched_request = self._find_best_matching_request_by_text_unlocked(button_text)
+                else:
+                    matched_request = self._find_matching_request_unlocked()
 
         if not matched_request:
             print(f"{Fore.YELLOW}Received buttons but no matching request found{Style.RESET_ALL}")
@@ -298,11 +331,50 @@ class TelegramMessenger:
             if self.on_download_failed:
                 await self.on_download_failed(matched_request.track, f"Failed to select track option: {e}")
     
+    async def _handle_download_confirmation(self, event):
+        """
+        Handle download confirmation messages (photo + buttons).
+
+        The bot sends these after track selection with a "💾 Скачать страницу"
+        button. We should NOT consume a track selection pending request here.
+        Instead, click the download button if present.
+        """
+        # Look for the download button (Скачать = download)
+        download_clicked = False
+        if event.message.buttons:
+            for row_idx, row in enumerate(event.message.buttons):
+                buttons = row if isinstance(row, list) else [row]
+                for btn_idx, btn in enumerate(buttons):
+                    if hasattr(btn, 'text') and btn.text and 'скачать' in btn.text.lower():
+                        try:
+                            await event.message.click(data=btn.data if hasattr(btn, 'data') else None)
+                            if self.debug_mode:
+                                self._clear_print(f"{Fore.MAGENTA}DEBUG: Clicked download button: {btn.text}{Style.RESET_ALL}")
+                            download_clicked = True
+                        except Exception as e:
+                            if self.debug_mode:
+                                print(f"{Fore.MAGENTA}DEBUG: Error clicking download button: {e}{Style.RESET_ALL}")
+                        break
+                if download_clicked:
+                    break
+
+        if not download_clicked and self.debug_mode:
+            button_text = self._extract_button_text(event)
+            print(f"{Fore.MAGENTA}DEBUG: Confirmation message with no download button. Buttons: {button_text}{Style.RESET_ALL}")
+
     async def _handle_nothing_found_response(self, event):
         """Handle 'nothing found' image responses from bot"""
-        # Find matching pending request (thread-safe)
+        # Try reply-to matching first, then FIFO
+        reply_to_msg_id = None
+        if event.message.reply_to:
+            reply_to_msg_id = event.message.reply_to.reply_to_msg_id
+
         async with self._pending_lock:
-            matched_request = self._find_matching_request_unlocked()
+            matched_request = None
+            if reply_to_msg_id:
+                matched_request = self._find_request_by_reply_id_unlocked(reply_to_msg_id)
+            if not matched_request:
+                matched_request = self._find_matching_request_unlocked()
 
         if not matched_request:
             if self.debug_mode:
