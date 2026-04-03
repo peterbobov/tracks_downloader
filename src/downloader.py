@@ -725,12 +725,18 @@ class SpotifyDownloader:
         """
         Wait for all tracks in a batch to complete (success, fail, or not found).
 
+        Early exit: if all remaining tracks are stuck at SENT_TO_BOT (no file
+        arrived) for 30s after the last track completed, skip to next batch.
+
         Note: On timeout, tracks are NOT marked as failed - they continue processing
         in the background and can still complete in subsequent batches. This prevents
         losing tracks that are just slow to download.
         """
         start_time = time.time()
         batch_track_ids = [track.id for track in batch_tracks]
+        last_completion_time = None  # When the most recent track finished
+        prev_completed_count = 0
+        stale_timeout = 30  # Seconds to wait for stuck tracks after others finish
 
         if self.debug_mode:
             print(f"{Fore.MAGENTA}DEBUG: Waiting for batch with track IDs: {batch_track_ids}{Style.RESET_ALL}")
@@ -743,16 +749,21 @@ class SpotifyDownloader:
             # Check status of all tracks in this batch
             incomplete_tracks = []
             completed_statuses = []
+            completed_count = 0
+            all_incomplete_stuck = True  # True if all incomplete tracks are just SENT_TO_BOT
 
             for track_id in batch_track_ids:
                 if track_id in session.tracks:
                     track_status = session.tracks[track_id].status
                     completed_statuses.append(track_status.value)
-                    # Track is incomplete if it's still being processed
-                    if track_status not in [TrackStatus.COMPLETED, TrackStatus.FAILED]:
+                    if track_status in [TrackStatus.COMPLETED, TrackStatus.FAILED]:
+                        completed_count += 1
+                    else:
                         incomplete_tracks.append(track_id)
+                        # If any incomplete track is actively downloading, don't skip
+                        if track_status != TrackStatus.SENT_TO_BOT:
+                            all_incomplete_stuck = False
                 else:
-                    # Track not in session yet - still incomplete
                     incomplete_tracks.append(track_id)
                     completed_statuses.append("not_in_session")
 
@@ -763,8 +774,22 @@ class SpotifyDownloader:
                 print(f"{Fore.GREEN}✓ Batch completed - all tracks processed{Style.RESET_ALL}")
                 break
 
+            # Update last_completion_time when a new track finishes
+            if completed_count > prev_completed_count:
+                last_completion_time = time.time()
+                prev_completed_count = completed_count
+
+            # Early exit: some tracks done, remaining are stuck at SENT_TO_BOT
+            if (completed_count > 0 and all_incomplete_stuck and
+                    last_completion_time is not None and
+                    (time.time() - last_completion_time) >= stale_timeout):
+                stuck_count = len(incomplete_tracks)
+                self._clear_print(
+                    f"{Fore.YELLOW}Skipping {stuck_count} track(s) that never started downloading "
+                    f"({stale_timeout}s after last completion){Style.RESET_ALL}")
+                break
+
             # Show progress (only if different from last message)
-            completed_count = len(batch_track_ids) - len(incomplete_tracks)
             progress_message = f"Batch progress: {completed_count}/{len(batch_track_ids)} tracks completed"
 
             if progress_message != self.last_batch_progress_message:
