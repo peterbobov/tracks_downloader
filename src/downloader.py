@@ -613,6 +613,13 @@ class SpotifyDownloader:
                     )
                     batch_timeout = min(batch_timeout, BatchConstants.MAX_BATCH_TIMEOUT)
                     await self._wait_for_batch_completion(batch, timeout=batch_timeout)
+
+                    # Flush any stale pending requests from this batch to prevent
+                    # them from polluting the next batch's response matching
+                    batch_track_ids = {track.id for track in batch}
+                    flushed = await self.telegram.flush_pending_for_tracks(batch_track_ids)
+                    if flushed > 0:
+                        print(f"{Fore.YELLOW}Cleared {flushed} unmatched request(s) from batch {batch_num}{Style.RESET_ALL}")
         
         # Wait for final responses and downloads to complete
         self._clear_print(f"{Fore.YELLOW}Waiting for remaining bot responses...{Style.RESET_ALL}")

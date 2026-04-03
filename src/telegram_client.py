@@ -414,11 +414,19 @@ class TelegramMessenger:
             del self.pending_responses[best_request_id]
             return best_match
 
-        # Fall back to FIFO if no good smart match
-        if self.debug_mode:
-            print(f"{Fore.YELLOW}→ Falling back to FIFO (best score: {best_score:.1f}%){Style.RESET_ALL}")
+        # Only fall back to FIFO if there's exactly 1 pending request (no ambiguity)
+        if len(self.pending_responses) == 1:
+            if self.debug_mode:
+                print(f"{Fore.YELLOW}→ Single pending request, using FIFO fallback (best score: {best_score:.1f}%){Style.RESET_ALL}")
+            return self._find_matching_request_unlocked()
 
-        return self._find_matching_request_unlocked()
+        # Multiple pending requests with low confidence — don't guess
+        if self.debug_mode:
+            print(f"{Fore.YELLOW}→ No confident match among {len(self.pending_responses)} pending requests "
+                  f"(best score: {best_score:.1f}%). Skipping file.{Style.RESET_ALL}")
+        self._clear_print(f"{Fore.YELLOW}⚠ Could not match file '{bot_filename}' to any pending track "
+                          f"(best: {best_score:.0f}% confidence){Style.RESET_ALL}")
+        return None
     
     def _extract_filename(self, document, fallback_name: str) -> str:
         """Extract filename from document or generate fallback"""
@@ -587,6 +595,26 @@ class TelegramMessenger:
         
         return results
     
+    async def flush_pending_for_tracks(self, track_ids: set[str]) -> int:
+        """
+        Remove pending requests for specific track IDs.
+
+        Called between batches to prevent stale requests from polluting
+        the next batch's response matching.
+
+        Returns number of flushed requests.
+        """
+        async with self._pending_lock:
+            to_remove = [
+                msg_id for msg_id, request in self.pending_responses.items()
+                if request.track.id in track_ids
+            ]
+            for msg_id in to_remove:
+                del self.pending_responses[msg_id]
+            if to_remove and self.debug_mode:
+                print(f"{Fore.YELLOW}Flushed {len(to_remove)} stale pending requests from previous batch{Style.RESET_ALL}")
+            return len(to_remove)
+
     async def get_pending_count(self) -> int:
         """Get number of pending responses (thread-safe)"""
         async with self._pending_lock:
