@@ -188,11 +188,76 @@ class TelegramMessenger:
         elif self.debug_mode:
             print(f"{Fore.MAGENTA}DEBUG: Unknown message type detected{Style.RESET_ALL}")
     
+    def _extract_button_text(self, event) -> str:
+        """Extract text from button message for matching (button labels + message text)"""
+        parts = []
+        if event.message.text:
+            parts.append(event.message.text)
+        if event.message.buttons:
+            for row in event.message.buttons:
+                if isinstance(row, list):
+                    for btn in row:
+                        if hasattr(btn, 'text') and btn.text:
+                            parts.append(btn.text)
+                elif hasattr(row, 'text') and row.text:
+                    parts.append(row.text)
+        return ' '.join(parts)
+
+    def _find_best_matching_request_by_text_unlocked(self, button_text: str) -> Optional[PendingRequest]:
+        """
+        Find best matching pending request using button/message text similarity.
+
+        Note: Must be called while holding self._pending_lock.
+        """
+        self._cleanup_expired_requests_unlocked()
+
+        if not self.pending_responses:
+            return None
+
+        best_match = None
+        best_score = 0.0
+        best_request_id = None
+
+        for request_id, request in self.pending_responses.items():
+            spotify_full = f"{request.track.artist_string} - {request.track.name}"
+            score = fuzz.token_sort_ratio(
+                normalize_text(button_text),
+                normalize_text(spotify_full)
+            )
+
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}  Button match: {score:.0f}% - {spotify_full}{Style.RESET_ALL}")
+
+            if score > best_score:
+                best_score = score
+                best_match = request
+                best_request_id = request_id
+
+        if best_score >= TelegramConstants.CONFIDENCE_THRESHOLD and best_match:
+            del self.pending_responses[best_request_id]
+            return best_match
+
+        # Single pending request — no ambiguity
+        if len(self.pending_responses) == 1:
+            return self._find_matching_request_unlocked()
+
+        # Multiple requests, low confidence — don't guess
+        if self.debug_mode:
+            print(f"{Fore.YELLOW}→ No confident button match among {len(self.pending_responses)} pending "
+                  f"(best: {best_score:.0f}%){Style.RESET_ALL}")
+        return None
+
     async def _handle_button_response(self, event):
         """Handle button responses from bot (track options)"""
-        # Find matching pending request (thread-safe)
+        # Extract text from buttons/message for smart matching
+        button_text = self._extract_button_text(event)
+
+        # Find matching pending request using content-based matching (thread-safe)
         async with self._pending_lock:
-            matched_request = self._find_matching_request_unlocked()
+            if button_text and len(self.pending_responses) > 1:
+                matched_request = self._find_best_matching_request_by_text_unlocked(button_text)
+            else:
+                matched_request = self._find_matching_request_unlocked()
 
         if not matched_request:
             print(f"{Fore.YELLOW}Received buttons but no matching request found{Style.RESET_ALL}")
