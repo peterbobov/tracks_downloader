@@ -789,6 +789,13 @@ class SpotifyDownloader:
                     f"({stale_timeout}s after last completion){Style.RESET_ALL}")
                 break
 
+            # Early exit: NO tracks have started downloading at all after 60s
+            if (completed_count == 0 and all_incomplete_stuck and
+                    (time.time() - start_time) >= 60):
+                self._clear_print(
+                    f"{Fore.YELLOW}No tracks received after 60s — skipping batch{Style.RESET_ALL}")
+                break
+
             # Show progress (only if different from last message)
             progress_message = f"Batch progress: {completed_count}/{len(batch_track_ids)} tracks completed"
 
