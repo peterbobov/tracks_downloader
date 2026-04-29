@@ -348,6 +348,12 @@ RESPONSE_TIMEOUT=600
 
 ## Version History
 
+### v3.1.0 (April 2026) - Revert to Direct Spotify Links
+- Removed Tidal link conversion — bot no longer supports Tidal URLs
+- Deleted `src/link_converter.py` and removed `LinkConverter` from orchestrator
+- Spotify URLs (from `track.url`) are now sent directly to the bot
+- `link_cache` table left in catalog (unused, harmless; avoids schema migration)
+
 ### v3.0.0 (April 2026) - Clean Architecture & Smart Dedup
 - Deleted 3 legacy files, deleted `missing_tracks.py`
 - Renamed `main.py` → `downloader.py`
