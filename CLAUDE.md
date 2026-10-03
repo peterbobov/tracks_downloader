@@ -304,6 +304,8 @@ spotify_downloader/
 │   ├── utils.py               # Shared utilities
 │   └── constants.py           # Configuration constants
 ├── tests/                     # pytest suite (uv run pytest)
+├── tools/
+│   └── rekordbox_flac_to_aiff.py  # One-off: convert Rekordbox library FLACs to AIFF in place
 ├── run.py                     # Thin CLI entry point
 ├── catalog.db                 # SQLite track catalog (auto-created)
 ├── pyproject.toml             # Project config and dependencies (uv)
@@ -362,7 +364,47 @@ RESPONSE_TIMEOUT=600
 - `--include-similar`: Also download tracks that only fuzzy-match an existing library file
 - `--debug`: Enable debug output
 
+## Rekordbox FLAC → AIFF Migration Tool
+
+`tools/rekordbox_flac_to_aiff.py` converts FLAC tracks already in the Rekordbox library to
+AIFF **without losing cues, grids, My Tags, ratings, history or playlists**. Rekordbox's own
+Relocate refuses to change file type, so the script does what a relocate does plus the format
+change. Self-contained (PEP 723 inline deps, `pyrekordbox==0.4.4`, tested on Rekordbox 7.2.16);
+needs `ffmpeg` and Rekordbox fully closed.
+
+```bash
+# Dry run (default) — shows what would change
+uv run tools/rekordbox_flac_to_aiff.py --all --max-bits 16 --max-rate 48000
+# Full run used in Oct 2026: 16-bit, 44.1/48k, FLACs to Trash, folder by folder
+uv run tools/rekordbox_flac_to_aiff.py --all --max-bits 16 --max-rate 48000 --reconvert --trash-flac --apply
+# Test on specific tracks / one folder first
+uv run tools/rekordbox_flac_to_aiff.py --ids 114074366 --apply
+uv run tools/rekordbox_flac_to_aiff.py --folder "Vol September" --apply
+# Undo a run
+uv run tools/rekordbox_flac_to_aiff.py --rollback ~/Library/Pioneer/rekordbox/flac2aiff_backups/<stamp>
+```
+
+How it works (derived by diffing `master.db` + ANLZ files before/after a real Rekordbox relocate):
+- Converts each FLAC to an AIFF next to it, then verifies: decoded-audio MD5 when lossless,
+  same sample count when only bit depth drops (dithered), same duration ±1 sample when resampled
+  (88.2k→44.1k, 96k→48k; measured 0-sample offset, cues/grids are stored in ms)
+- Updates only the track's `djmdContent` row (`FolderPath`, `FileNameL`, `FileType` 5→12,
+  `BitDepth`, `SampleRate`, `BitRate` = rate×bits×channels/1000, `FileSize`); pyrekordbox's
+  commit bumps the USN counters like Rekordbox does. Track ID unchanged → everything else kept
+- Rewrites the file name in the `PPTH` tag of the track's `ANLZ0000.DAT/.EXT/.2EX` (`.3EX` has
+  none); byte-identical to what Rekordbox writes on relocate. Never-analysed tracks have no ANLZ
+- Commits folder by folder; stops before a folder if free space would drop below `--min-free-gb`
+  (default 8) or Rekordbox is opened; re-running skips finished tracks and reuses valid AIFFs
+- Backups per run in `~/Library/Pioneer/rekordbox/flac2aiff_backups/<stamp>/` (`master.db`,
+  `masterPlaylists6.xml`, touched ANLZ folders, `manifest.json`); FLACs only ever go to the
+  macOS Trash (`--trash-flac`, `--trash-converted`), so "Put Back" works until it's emptied
+- `--reconvert` rebuilds AIFFs from earlier runs that exceed `--max-bits/--max-rate` (needs FLAC)
+
 ## Version History
+
+### v3.1.1 (October 2026) - Rekordbox Library Migration
+- Added `tools/rekordbox_flac_to_aiff.py`: in-place FLAC → AIFF migration of the Rekordbox
+  library preserving cues, grids, tags and playlists (1,438 tracks converted, 0 failures)
 
 ### v3.1.0 (October 2026) - AIFF Output
 - Added `src/converter.py`: downloaded FLACs are converted to AIFF and replaced (lossless, tags + art preserved)
