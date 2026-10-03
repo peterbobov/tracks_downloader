@@ -10,10 +10,11 @@ Handles all Telegram interactions using Telethon including:
 """
 
 import asyncio
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Callable, Tuple
+from typing import Dict, List, Optional, Callable, Tuple
 from dataclasses import dataclass
 
 from fuzzywuzzy import fuzz
@@ -33,6 +34,100 @@ from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from colorama import Fore, Style
 
 from .spotify_api import Track
+from .catalog import SIMILARITY_THRESHOLD, VERSION_MARKERS, core_title, match_score
+from .utils import normalize_for_match
+
+# A track row in the bot's search-results menu: "Artist - Title 🅴 [m:ss]"
+SEARCH_RESULT_PATTERN = re.compile(
+    r'^(?P<artist>.+?) - (?P<title>.+?)\s*(?:🅴\s*)?\[(?P<min>\d{1,3}):(?P<sec>\d{2})\]\s*$'
+)
+
+# Max difference between Spotify and bot track length to count as the same version
+SEARCH_DURATION_TOLERANCE_S = 3
+
+
+def is_search_results(button_texts: List[str]) -> bool:
+    """True if the buttons are a search-results menu (track rows with durations)"""
+    return any(SEARCH_RESULT_PATTERN.match(text.strip()) for text in button_texts)
+
+
+def _base_title(title: str) -> str:
+    """Core title without version words, for comparing across stores' labels"""
+    return ' '.join(t for t in core_title(title).split() if t not in VERSION_MARKERS)
+
+
+def pick_search_result(button_texts: List[str], artist: str, title: str,
+                       duration_ms: int) -> Optional[int]:
+    """
+    Choose the search result matching a Spotify track.
+
+    Stores label versions inconsistently (Spotify's "Isak Original Extended"
+    is plain "Satisfaction" in the bot), so length is the main signal: the
+    artist and base title must match and the length must be within
+    SEARCH_DURATION_TOLERANCE_S; the closest length wins. Without a known
+    duration, the full title including version markers must match.
+
+    Returns:
+        Flat index of the button to click, or None if no result fits
+    """
+    target_artist = normalize_for_match(artist)
+    best: Optional[Tuple[Tuple[float, float], int]] = None
+
+    for index, text in enumerate(button_texts):
+        match = SEARCH_RESULT_PATTERN.match(text.strip())
+        if not match:
+            continue
+        if fuzz.token_set_ratio(target_artist, normalize_for_match(match['artist'])) < SIMILARITY_THRESHOLD:
+            continue
+
+        score = match_score(title, artist, match['title'], match['artist'])
+        if duration_ms:
+            length = int(match['min']) * 60 + int(match['sec'])
+            diff = abs(length - duration_ms / 1000)
+            if diff > SEARCH_DURATION_TOLERANCE_S:
+                continue
+            if fuzz.token_set_ratio(_base_title(title), _base_title(match['title'])) < SIMILARITY_THRESHOLD:
+                continue
+            key = (diff, -score)
+        else:
+            if score < SIMILARITY_THRESHOLD:
+                continue
+            key = (0, -score)
+
+        if best is None or key < best[0]:
+            best = (key, index)
+
+    return best[1] if best else None
+
+
+
+def duration_agrees(metadata: Dict, duration_ms: int) -> bool:
+    """False only when both lengths are known and differ by more than the tolerance"""
+    file_duration = metadata.get('duration')
+    if not file_duration or not duration_ms:
+        return True
+    return abs(file_duration - duration_ms / 1000) <= SEARCH_DURATION_TOLERANCE_S
+
+
+def file_matches_selection(selected_text: Optional[str], metadata: Dict) -> bool:
+    """
+    True if a received file is the search result we clicked.
+
+    After a selection the bot sends the file under its own label (e.g.
+    "Satisfaction", not Spotify's "Satisfaction - Isak Original Extended"),
+    so compare the file's audio tags and length to the clicked row instead.
+    """
+    if not selected_text or not metadata:
+        return False
+    match = SEARCH_RESULT_PATTERN.match(selected_text.strip())
+    title, performer, duration = metadata.get('title'), metadata.get('performer'), metadata.get('duration')
+    if not match or not (title and performer and duration):
+        return False
+
+    length = int(match['min']) * 60 + int(match['sec'])
+    if abs(duration - length) > SEARCH_DURATION_TOLERANCE_S:
+        return False
+    return match_score(title, performer, match['title'], match['artist']) >= SIMILARITY_THRESHOLD
 
 
 @dataclass
@@ -56,6 +151,7 @@ class PendingRequest:
     track_name: str
     sent_at: datetime
     message_id: int
+    selected_result: Optional[str] = None  # Search-result row clicked for this track
 
 
 class TelegramMessenger:
@@ -263,11 +359,22 @@ class TelegramMessenger:
         return None
 
     async def _handle_button_response(self, event):
-        """Handle button responses from bot (track options)"""
-        # Check if this is a confirmation/download message (photo + buttons)
-        # These should not consume pending requests from track selection
-        if isinstance(event.message.media, MessageMediaPhoto):
-            await self._handle_download_confirmation(event)
+        """Handle button messages from bot.
+
+        Only search-results menus (track rows with durations) are acted on:
+        the one row matching the requested track is clicked. Everything else
+        (settings, quality menu, promos) is ignored — in particular the
+        "💾 Скачать страницу" button is never clicked, since it downloads
+        every result on the page.
+        """
+        button_texts = [
+            btn.text for row in event.message.buttons
+            for btn in (row if isinstance(row, list) else [row])
+            if getattr(btn, 'text', None)
+        ]
+        if not is_search_results(button_texts):
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}DEBUG: Ignoring non-search button message: {button_texts[:4]}{Style.RESET_ALL}")
             return
 
         # Try matching by reply-to message ID first (most reliable)
@@ -293,74 +400,42 @@ class TelegramMessenger:
                     matched_request = self._find_matching_request_unlocked()
 
         if not matched_request:
-            print(f"{Fore.YELLOW}Received buttons but no matching request found{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Received search results but no matching request found{Style.RESET_ALL}")
             return
 
+        track = matched_request.track
         track_name = matched_request.track_name
 
-        # Log button options received
-        self._clear_print(f"{Fore.CYAN}Bot found options for: {track_name}{Style.RESET_ALL}")
+        index = pick_search_result(button_texts, track.artist_string, track.name, track.duration_ms)
+        if index is None:
+            self._clear_print(f"{Fore.YELLOW}⚠ No matching version in bot search results: {track_name}{Style.RESET_ALL}")
+            if self.debug_mode:
+                print(f"{Fore.MAGENTA}DEBUG: Options were: {button_texts}{Style.RESET_ALL}")
+            if self.on_download_failed:
+                await self.on_download_failed(track, "No matching version in bot search results")
+            return
 
-        # Click the first button automatically
         try:
-            if event.message.buttons and len(event.message.buttons) > 0:
-                first_row = event.message.buttons[0]
-                if isinstance(first_row, list) and len(first_row) > 0:
-                    first_button = first_row[0]
-                else:
-                    first_button = first_row
+            await event.message.click(index)  # flat index across all rows
+            self._clear_print(f"{Fore.GREEN}✓ Selected '{button_texts[index]}' for: {track_name}{Style.RESET_ALL}")
 
-                # Click the button to select track
-                await event.message.click(0)  # Click first button (index 0)
-                self._clear_print(f"{Fore.GREEN}✓ Selected first option for: {track_name}{Style.RESET_ALL}")
-
-                # Create new pending request for the file download with updated timestamp
-                # Use consistent key format with track ID
-                new_key = f"msg_{event.message.id}_{matched_request.track.id[:8]}"
-                new_request = PendingRequest(
-                    track=matched_request.track,
-                    track_name=matched_request.track_name,
-                    sent_at=datetime.now(),  # Reset timestamp for file download phase
-                    message_id=event.message.id
-                )
-                async with self._pending_lock:
-                    self.pending_responses[new_key] = new_request
+            # Create new pending request for the file download with updated timestamp
+            # Use consistent key format with track ID
+            new_key = f"msg_{event.message.id}_{track.id[:8]}"
+            new_request = PendingRequest(
+                track=track,
+                track_name=track_name,
+                sent_at=datetime.now(),  # Reset timestamp for file download phase
+                message_id=event.message.id,
+                selected_result=button_texts[index]
+            )
+            async with self._pending_lock:
+                self.pending_responses[new_key] = new_request
 
         except Exception as e:
             print(f"{Fore.RED}Error clicking button for {track_name}: {e}{Style.RESET_ALL}")
             if self.on_download_failed:
-                await self.on_download_failed(matched_request.track, f"Failed to select track option: {e}")
-    
-    async def _handle_download_confirmation(self, event):
-        """
-        Handle download confirmation messages (photo + buttons).
-
-        The bot sends these after track selection with a "💾 Скачать страницу"
-        button. We should NOT consume a track selection pending request here.
-        Instead, click the download button if present.
-        """
-        # Look for the download button (Скачать = download)
-        download_clicked = False
-        if event.message.buttons:
-            for row_idx, row in enumerate(event.message.buttons):
-                buttons = row if isinstance(row, list) else [row]
-                for btn_idx, btn in enumerate(buttons):
-                    if hasattr(btn, 'text') and btn.text and 'скачать' in btn.text.lower():
-                        try:
-                            await event.message.click(data=btn.data if hasattr(btn, 'data') else None)
-                            if self.debug_mode:
-                                self._clear_print(f"{Fore.MAGENTA}DEBUG: Clicked download button: {btn.text}{Style.RESET_ALL}")
-                            download_clicked = True
-                        except Exception as e:
-                            if self.debug_mode:
-                                print(f"{Fore.MAGENTA}DEBUG: Error clicking download button: {e}{Style.RESET_ALL}")
-                        break
-                if download_clicked:
-                    break
-
-        if not download_clicked and self.debug_mode:
-            button_text = self._extract_button_text(event)
-            print(f"{Fore.MAGENTA}DEBUG: Confirmation message with no download button. Buttons: {button_text}{Style.RESET_ALL}")
+                await self.on_download_failed(track, f"Failed to select track option: {e}")
 
     async def _handle_nothing_found_response(self, event):
         """Handle 'nothing found' image responses from bot"""
@@ -515,6 +590,14 @@ class TelegramMessenger:
         if not self.pending_responses:
             return None
 
+        # Exact: the file is the search result we clicked for a request
+        for request_id, request in self.pending_responses.items():
+            if file_matches_selection(request.selected_result, bot_metadata):
+                if self.debug_mode:
+                    print(f"{Fore.GREEN}✓ File matches selected result '{request.selected_result}'{Style.RESET_ALL}")
+                del self.pending_responses[request_id]
+                return request
+
         best_match = None
         best_score = 0.0
         best_request_id = None
@@ -524,6 +607,11 @@ class TelegramMessenger:
         for request_id, request in self.pending_responses.items():
             spotify_artist = request.track.artist_string
             spotify_title = request.track.name
+
+            # A file of a different length is a different version, whatever its name
+            if not duration_agrees(bot_metadata, request.track.duration_ms):
+                match_details.append((request_id, 0.0, f"{spotify_artist} - {spotify_title} (length mismatch)"))
+                continue
 
             score = self._calculate_track_similarity(
                 bot_filename, bot_metadata,

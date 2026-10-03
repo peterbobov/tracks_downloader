@@ -9,6 +9,7 @@ Common utilities used across the spotify_downloader project including:
 """
 
 import re
+import unicodedata
 from typing import Optional
 
 
@@ -57,6 +58,23 @@ def normalize_text(text: str) -> str:
     return result.strip()
 
 
+def normalize_for_match(text: Optional[str]) -> str:
+    """
+    Normalize text for library matching.
+
+    Lowercases, strips accents (Naté → nate) and turns all punctuation into
+    spaces, so "A, B", "A & B" and "A; B" compare equal. Non-Latin letters
+    (e.g. Cyrillic) are kept.
+    """
+    if not text:
+        return ''
+    result = unicodedata.normalize('NFKD', text)
+    result = ''.join(c for c in result if not unicodedata.combining(c))
+    result = result.lower().replace("'", '').replace('’', '')
+    result = re.sub(r'[\W_]+', ' ', result)
+    return ' '.join(result.split())
+
+
 def strip_bot_artifacts(filename: str) -> str:
     """
     Strip bot-added artifacts from filenames for better matching.
@@ -69,7 +87,7 @@ def strip_bot_artifacts(filename: str) -> str:
     Strips: leading track number + separator, trailing hash code.
     """
     # Remove file extension
-    result = re.sub(r'\.(flac|mp3|wav|m4a|ogg)$', '', filename, flags=re.IGNORECASE)
+    result = re.sub(r'\.(flac|aiff?|mp3|wav|m4a|ogg)$', '', filename, flags=re.IGNORECASE)
 
     # Remove leading track number + separator (e.g., "5_", "1-", "20-")
     result = re.sub(r'^\d{1,3}[-_]', '', result)

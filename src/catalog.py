@@ -16,14 +16,81 @@ from typing import Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import json
+import re
+
+from fuzzywuzzy import fuzz
+
+from .constants import FileConstants
+from .utils import normalize_for_match
 
 try:
     from mutagen import File as MutagenFile
     from mutagen.flac import FLAC
     from mutagen.mp3 import MP3
+    from mutagen.id3 import ID3
     MUTAGEN_AVAILABLE = True
 except ImportError:
     MUTAGEN_AVAILABLE = False
+
+
+# Catalog schema version (PRAGMA user_version)
+# 2: track IDs use normalize_for_match (accent/punctuation-insensitive)
+SCHEMA_VERSION = 2
+
+# Formats preferred over lossy copies of the same track
+LOSSLESS_EXTENSIONS = {'.flac', '.aiff', '.aif', '.wav'}
+
+# Minimum match_score to treat a library track as "probably the same"
+SIMILARITY_THRESHOLD = 90
+
+# Title words that mark a distinct version (remix, extended, ...) of a track
+VERSION_MARKERS = {
+    'remix', 'rmx', 'mix', 'edit', 'version', 'extended', 'rework', 'dub', 'vip',
+    'bootleg', 'radio', 'club', 'instrumental', 'acapella', 'live', 'cover',
+    'flip', 'refix', 'reprise', 'remake', 'mashup',
+}
+
+# Featured-artist suffixes: "(feat. X)", "[ft. X]", "feat. X"
+_FEAT_PATTERN = re.compile(
+    r'[(\[]\s*(?:feat|ft|featuring)\b[^)\]]*[)\]]'
+    r'|\s(?:feat|ft|featuring)\b\.?\s.*?(?=\s-\s|[(\[]|$)',
+    re.IGNORECASE,
+)
+
+
+def core_title(title: str) -> str:
+    """Normalized title without featured artists, remaster notes or 'original mix'"""
+    result = normalize_for_match(_FEAT_PATTERN.sub(' ', title or ''))
+    result = re.sub(r'\boriginal mix\b', ' ', result)
+    result = re.sub(r'\b(?:\d{4} )?remaster(?:ed)?(?: \d{4})?(?: version)?\b', ' ', result)
+    return ' '.join(result.split())
+
+
+def match_score(title_a: str, artist_a: str, title_b: str, artist_b: str) -> float:
+    """
+    Similarity (0-100) between two tracks for duplicate detection.
+
+    Titles must carry the same version markers (a remix never matches the
+    original, an extended never matches a radio edit). Without markers, an
+    extra subtitle on one side is tolerated; with markers, the whole title
+    (including remixer) must match closely. Artists must overlap.
+    """
+    core_a, core_b = core_title(title_a), core_title(title_b)
+    if not core_a or not core_b:
+        return 0
+
+    markers_a = VERSION_MARKERS.intersection(core_a.split())
+    markers_b = VERSION_MARKERS.intersection(core_b.split())
+    if markers_a != markers_b:
+        return 0
+
+    if markers_a:
+        title_score = fuzz.token_sort_ratio(core_a, core_b)
+    else:
+        title_score = fuzz.token_set_ratio(core_a, core_b)
+
+    artist_score = fuzz.token_set_ratio(normalize_for_match(artist_a), normalize_for_match(artist_b))
+    return min(title_score, artist_score)
 
 
 @dataclass
@@ -123,14 +190,47 @@ class LibraryCatalog:
             conn.execute('CREATE INDEX IF NOT EXISTS idx_file_path ON tracks(file_path)')
             conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_spotify_id ON tracks(spotify_id)')
 
+            if conn.execute('PRAGMA user_version').fetchone()[0] < SCHEMA_VERSION:
+                self._migrate_track_ids(conn)
+                conn.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+
             conn.commit()
+
+    def _migrate_track_ids(self, conn: sqlite3.Connection) -> None:
+        """Recompute track IDs with the current normalization.
+
+        Rows that now share an ID (e.g. "Naté" and "Nate") are merged, keeping
+        the one with a spotify_id, then one whose file exists, then the newest.
+        """
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute('SELECT * FROM tracks')]
+        conn.row_factory = None
+
+        def preference(row):
+            return (row['spotify_id'] is not None, Path(row['file_path']).exists(), row['date_added'] or '')
+
+        best: Dict[str, Dict] = {}
+        for row in rows:
+            row['id'] = self.generate_track_id(row['title'], row['artist'])
+            current = best.get(row['id'])
+            if current is None or preference(row) > preference(current):
+                best[row['id']] = row
+
+        conn.execute('DELETE FROM tracks')
+        columns = list(rows[0].keys()) if rows else []
+        if columns:
+            placeholders = ', '.join('?' for _ in columns)
+            conn.executemany(
+                f"INSERT INTO tracks ({', '.join(columns)}) VALUES ({placeholders})",
+                [tuple(r[c] for c in columns) for r in best.values()],
+            )
     
     @staticmethod
     def generate_track_id(title: str, artist: str) -> str:
         """Generate unique track ID from title and artist"""
-        # Normalize strings for consistent ID generation
-        normalized_title = title.lower().strip()
-        normalized_artist = artist.lower().strip()
+        # Normalize strings for consistent ID generation (accent/punctuation-insensitive)
+        normalized_title = normalize_for_match(title)
+        normalized_artist = normalize_for_match(artist)
         
         # Create MD5 hash
         combined = f"{normalized_artist}:{normalized_title}"
@@ -174,12 +274,12 @@ class LibraryCatalog:
                     if key in audio_file:
                         metadata['extra_metadata'][key] = audio_file[key][0]
             
-            elif isinstance(audio_file, MP3):
+            elif isinstance(audio_file, MP3) or isinstance(audio_file.tags, ID3):
                 metadata['title'] = str(audio_file.get('TIT2', '')) if audio_file.get('TIT2') else None
                 metadata['artist'] = str(audio_file.get('TPE1', '')) if audio_file.get('TPE1') else None
                 metadata['album'] = str(audio_file.get('TALB', '')) if audio_file.get('TALB') else None
                 
-                # Store additional MP3 metadata
+                # Store additional ID3 metadata (MP3, AIFF)
                 for key in ['TDRC', 'TCON', 'TRCK', 'TPE2']:  # Year, Genre, Track, Album Artist
                     if key in audio_file:
                         metadata['extra_metadata'][key] = str(audio_file[key])
@@ -250,6 +350,14 @@ class LibraryCatalog:
             
             # Generate track ID
             track_id = self.generate_track_id(metadata['title'], metadata['artist'])
+
+            # One row per artist:title — never let a lossy copy replace an existing lossless one
+            if self._existing_copy_is_better(track_id, file_path):
+                return True
+
+            # Keep a known spotify_id when re-adding without one (e.g. library rescan)
+            if spotify_id is None:
+                spotify_id = self._existing_spotify_id(file_path, track_id)
             
             # Prepare track data
             track_data = CatalogTrack(
@@ -295,7 +403,7 @@ class LibraryCatalog:
         Returns: (added_count, error_count)
         """
         if file_extensions is None:
-            file_extensions = ['.flac', '.mp3', '.wav', '.m4a', '.ogg']
+            file_extensions = FileConstants.SUPPORTED_EXTENSIONS
         
         added_count = 0
         error_count = 0
@@ -323,6 +431,52 @@ class LibraryCatalog:
         
         return added_count, error_count
     
+    def _existing_copy_is_better(self, track_id: str, file_path: Path) -> bool:
+        """True if the catalog already holds a lossless file for this track and the new one is lossy"""
+        if file_path.suffix.lower() in LOSSLESS_EXTENSIONS:
+            return False
+        with sqlite3.connect(self.catalog_path) as conn:
+            row = conn.execute('SELECT file_path FROM tracks WHERE id = ?', (track_id,)).fetchone()
+        if not row or row[0] == str(file_path.absolute()):
+            return False
+        existing = Path(row[0])
+        return existing.suffix.lower() in LOSSLESS_EXTENSIONS and existing.exists()
+
+    def _existing_spotify_id(self, file_path: Path, track_id: str) -> Optional[str]:
+        """Spotify ID already stored for this file or this artist:title, if any"""
+        with sqlite3.connect(self.catalog_path) as conn:
+            row = conn.execute(
+                'SELECT spotify_id FROM tracks WHERE (file_path = ? OR id = ?) '
+                'AND spotify_id IS NOT NULL ORDER BY file_path = ? DESC LIMIT 1',
+                (str(file_path.absolute()), track_id, str(file_path.absolute()))
+            ).fetchone()
+        return row[0] if row else None
+
+    def find_similar(self, title: str, artist: str,
+                     threshold: float = SIMILARITY_THRESHOLD) -> Optional[Tuple[CatalogTrack, float]]:
+        """Best fuzzy match (see match_score) among tracks whose file exists.
+
+        Returns:
+            (track, score) for the best match at or above threshold, else None
+        """
+        artist_tokens = set(normalize_for_match(artist).split())
+        if not artist_tokens:
+            return None
+
+        best: Optional[Tuple[CatalogTrack, float]] = None
+        with sqlite3.connect(self.catalog_path) as conn:
+            conn.row_factory = sqlite3.Row
+            for row in conn.execute('SELECT * FROM tracks'):
+                # Cheap prefilter: artists must share at least one word
+                if not artist_tokens & set(normalize_for_match(row['artist']).split()):
+                    continue
+                score = match_score(title, artist, row['title'], row['artist'])
+                if score >= threshold and (best is None or score > best[1]):
+                    track = CatalogTrack(**dict(row))
+                    if Path(track.file_path).exists():
+                        best = (track, score)
+        return best
+
     def find_track(self, title: str, artist: str) -> Optional[CatalogTrack]:
         """Find a track by title and artist"""
         track_id = self.generate_track_id(title, artist)
@@ -333,8 +487,12 @@ class LibraryCatalog:
             row = cursor.fetchone()
             
             if row:
-                return CatalogTrack(**dict(row))
-        
+                track = CatalogTrack(**dict(row))
+                if Path(track.file_path).exists():
+                    return track
+                # Stale entry — file no longer exists
+                self.remove_track_by_path(track.file_path)
+
         return None
 
     def find_track_by_spotify_id(self, spotify_id: str) -> Optional[CatalogTrack]:

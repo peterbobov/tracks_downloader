@@ -60,7 +60,7 @@ class FileConstants:
     MIN_VALID_FILE_SIZE: int = 1024
 
     # Supported audio file extensions
-    SUPPORTED_EXTENSIONS: List[str] = ['.flac', '.mp3', '.wav', '.m4a', '.ogg']
+    SUPPORTED_EXTENSIONS: List[str] = ['.flac', '.aiff', '.aif', '.mp3', '.wav', '.m4a', '.ogg']
 
     # Invalid characters for filenames
     INVALID_FILENAME_CHARS: str = '<>:"/\\|?*'

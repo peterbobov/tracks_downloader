@@ -21,7 +21,7 @@ colorama_init()
 def print_banner():
     """Print application banner"""
     print(f"\n{Fore.CYAN}{'='*50}")
-    print(f"  Spotify DJ Track Automation v3.0.0")
+    print(f"  Spotify DJ Track Automation v3.1.0")
     print(f"{'='*50}{Style.RESET_ALL}\n")
 
 
@@ -48,6 +48,10 @@ def create_parser() -> argparse.ArgumentParser:
                         help='Start from track N (1-indexed)')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug output')
+    parser.add_argument('--keep-flac', action='store_true',
+                        help='Keep downloaded FLAC files instead of converting to AIFF')
+    parser.add_argument('--include-similar', action='store_true',
+                        help='Also download tracks that only fuzzy-match the library')
     parser.add_argument('--sequential', action='store_true',
                         help='Process tracks one at a time')
     parser.add_argument('--version', action='store_true',
@@ -66,6 +70,8 @@ async def handle_download(args):
         print(f"{Fore.RED}Configuration error: {e}{Style.RESET_ALL}")
         sys.exit(1)
 
+    config.convert_to_aiff = not args.keep_flac
+    config.include_similar = args.include_similar
     downloader = SpotifyDownloader(config)
 
     try:
@@ -170,7 +176,7 @@ async def main():
     args = parser.parse_args()
 
     if args.version:
-        print("spotify-downloader v3.0.0")
+        print("spotify-downloader v3.1.0")
         return
 
     if not args.target:

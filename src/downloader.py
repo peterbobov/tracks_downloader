@@ -14,7 +14,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Callable
+from typing import Optional, List, Dict, Callable, Tuple
 from dataclasses import dataclass
 
 from colorama import init, Fore, Style
@@ -24,10 +24,10 @@ from .spotify_api import SpotifyExtractor, Track, create_spotify_extractor
 from .utils import clear_print
 from .constants import Defaults, EnvVars, BatchConstants
 from .telegram_client import TelegramMessenger, TelegramConfig, create_telegram_messenger
-from .file_manager import FileManager, FileConfig, create_file_manager
+from .file_manager import FileManager, FileConfig, create_file_manager, write_m3u
 from .progress_tracker import ProgressTracker, TrackStatus, create_progress_tracker
-from .catalog import LibraryCatalog
-from .link_converter import LinkConverter
+from .catalog import LibraryCatalog, CatalogTrack
+from .converter import convert_to_aiff, ConversionError
 
 # Initialize colorama
 init()
@@ -58,6 +58,8 @@ class DownloadConfig:
     organize_by_artist: bool = True
     organize_by_album: bool = False
     create_year_folders: bool = False
+    convert_to_aiff: bool = True  # Replace downloaded FLACs with AIFF
+    include_similar: bool = False  # Download tracks that fuzzy-match the library
 
     # Session management
     progress_file: str = Defaults.PROGRESS_FILE
@@ -224,9 +226,6 @@ class SpotifyDownloader:
         # Catalog for track dedup
         self.catalog = LibraryCatalog()
 
-        # Link converter for Spotify → Tidal URL conversion
-        self.link_converter = LinkConverter(catalog=self.catalog)
-
         self.progress_tracker = create_progress_tracker(config.progress_file)
         
         # Runtime components (initialized during operation)
@@ -314,6 +313,7 @@ class SpotifyDownloader:
             tracks = self.spotify.extract_tracks(playlist_url)
             if not tracks:
                 return {"success": False, "error": "No tracks found in playlist"}
+            playlist_tracks = list(tracks)  # Full playlist, for the .m3u8
             
             # Apply start_from offset (convert from 1-based to 0-based index)
             start_index = max(0, start_from - 1)
@@ -342,63 +342,29 @@ class SpotifyDownloader:
             # Set playlist name for file organization
             self.file_manager.set_playlist_name(playlist_info['name'])
 
-            if dry_run:
-                return self._dry_run_report(tracks)
-
             # Check catalog — skip tracks we already have
-            missing_tracks = []
-            skipped = 0
-            for track in tracks:
-                # Check by spotify_id first
-                found = self.catalog.find_track_by_spotify_id(track.id)
-                if found:
-                    skipped += 1
-                    continue
-
-                # Fallback: check by artist:title hash
-                hash_id = LibraryCatalog.generate_track_id(track.artist_string, track.name)
-                found = self.catalog.find_track(track.name, track.artist_string)
-                if found:
-                    # Backfill spotify_id for future fast lookups
-                    self.catalog.backfill_spotify_id(hash_id, track.id)
-                    skipped += 1
-                    continue
-
-                missing_tracks.append(track)
+            missing_tracks, skipped, probable = self._split_by_library(tracks)
 
             print(f"\n  Total: {len(tracks)} tracks in playlist")
             print(f"  Already in library: {skipped}")
+            if probable:
+                self._print_probable_matches(probable)
+                if self.config.include_similar:
+                    print(f"  {Fore.YELLOW}--include-similar: downloading these anyway{Style.RESET_ALL}")
+                    missing_tracks.extend(track for track, _, _ in probable)
+                else:
+                    skipped += len(probable)
             print(f"  To download: {len(missing_tracks)}")
+
+            if dry_run:
+                return self._dry_run_report(missing_tracks)
 
             if not missing_tracks:
                 print(f"\n{Fore.GREEN}  All tracks already in library!{Style.RESET_ALL}")
+                self._write_playlist_m3u(playlist_tracks)
                 return {"success": True, "total": len(tracks), "skipped": skipped, "downloaded": 0}
 
             tracks = missing_tracks
-
-            # Convert Spotify URLs to Tidal URLs (required by bot)
-            print(f"\n{Fore.CYAN}Converting links to Tidal...{Style.RESET_ALL}")
-            tidal_urls = self.link_converter.convert_tracks(tracks, debug=self.debug_mode)
-
-            # Only keep tracks with Tidal URLs
-            ready_tracks = []
-            skipped_no_tidal = 0
-            for track in tracks:
-                tidal_url = tidal_urls.get(track.id)
-                if tidal_url:
-                    track.url = tidal_url
-                    ready_tracks.append(track)
-                else:
-                    skipped_no_tidal += 1
-
-            if skipped_no_tidal:
-                print(f"  {Fore.YELLOW}Skipping {skipped_no_tidal} tracks not available on Tidal{Style.RESET_ALL}")
-
-            if not ready_tracks:
-                print(f"\n{Fore.YELLOW}  No tracks ready to download.{Style.RESET_ALL}")
-                return {"success": True, "total": len(tracks), "skipped": skipped, "downloaded": 0}
-
-            tracks = ready_tracks
 
             # Security confirmation
             if not self._confirm_download(len(tracks), batch_size):
@@ -410,10 +376,39 @@ class SpotifyDownloader:
             )
             
             # Process tracks
-            return await self._process_tracks(tracks, batch_size or self.config.batch_size, sequential)
-            
+            result = await self._process_tracks(tracks, batch_size or self.config.batch_size, sequential)
+            self._write_playlist_m3u(playlist_tracks)
+            return result
+
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _write_playlist_m3u(self, tracks: List[Track]) -> None:
+        """Write <playlist>.m3u8 into the playlist folder, pointing at every track in the library.
+
+        Tracks already owned live in other folders, so dragging the folder into
+        Rekordbox misses them; importing this file gives the complete playlist.
+        """
+        entries = []
+        for track in tracks:
+            found = (self.catalog.find_track_by_spotify_id(track.id)
+                     or self.catalog.find_track(track.name, track.artist_string))
+            if not found:
+                similar = self.catalog.find_similar(track.name, track.artist_string)
+                found = similar[0] if similar else None
+            if found:
+                entries.append((Path(found.file_path), track.duration_ms // 1000,
+                                f"{track.artist_string} - {track.name}"))
+
+        if not entries:
+            return
+        folder = self.file_manager.get_playlist_folder()
+        m3u_path = folder / f"{folder.name}.m3u8"
+        try:
+            write_m3u(m3u_path, entries)
+            print(f"{Fore.CYAN}Playlist file: {m3u_path} ({len(entries)}/{len(tracks)} tracks){Style.RESET_ALL}")
+        except OSError as e:
+            print(f"{Fore.YELLOW}⚠ Could not write playlist file: {e}{Style.RESET_ALL}")
     
     async def _resume_session(self, dry_run: bool, batch_size: Optional[int], limit: Optional[int], sequential: bool, start_from: int) -> Dict:
         """Resume an existing session"""
@@ -490,22 +485,66 @@ class SpotifyDownloader:
         
         return await self._process_tracks(tracks_to_process, batch_size or self.config.batch_size, sequential)
     
+    def _split_by_library(self, tracks: List[Track]) -> Tuple[List[Track], int, List[Tuple[Track, CatalogTrack, float]]]:
+        """
+        Classify tracks against the catalog.
+
+        Returns:
+            (missing tracks, count already in library, probable matches as (track, catalog_track, score))
+        """
+        missing: List[Track] = []
+        owned = 0
+        probable: List[Tuple[Track, CatalogTrack, float]] = []
+
+        for track in tracks:
+            # Exact: by spotify_id
+            if self.catalog.find_track_by_spotify_id(track.id):
+                owned += 1
+                continue
+
+            # Exact: by normalized artist:title — backfill spotify_id for next time
+            found = self.catalog.find_track(track.name, track.artist_string)
+            if found:
+                self.catalog.backfill_spotify_id(found.id, track.id)
+                owned += 1
+                continue
+
+            # Fuzzy: probably the same track under a slightly different name
+            similar = self.catalog.find_similar(track.name, track.artist_string)
+            if similar:
+                probable.append((track, similar[0], similar[1]))
+                continue
+
+            missing.append(track)
+
+        return missing, owned, probable
+
+    def _print_probable_matches(self, probable: List[Tuple[Track, CatalogTrack, float]]) -> None:
+        """List tracks skipped as probable duplicates so they can be verified"""
+        library_root = Path(self.config.music_library_path).expanduser()
+        print(f"  {Fore.YELLOW}Probably in library: {len(probable)} (use --include-similar to download){Style.RESET_ALL}")
+        for track, match, score in probable:
+            path = Path(match.file_path)
+            try:
+                path = path.relative_to(library_root)
+            except ValueError:
+                pass
+            print(f"    • {track.artist_string} - {track.name}")
+            print(f"      {Fore.CYAN}≈ {path} ({score:.0f}%){Style.RESET_ALL}")
+
     def _dry_run_report(self, tracks: List[Track]) -> Dict:
         """Generate dry run report"""
         print(f"\n{Fore.YELLOW}DRY RUN MODE - No messages will be sent{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Would process {len(tracks)} tracks:{Style.RESET_ALL}\n")
-        
-        for i, track in enumerate(tracks[:20], 1):  # Show first 20
+        print(f"{Fore.YELLOW}Would download {len(tracks)} tracks:{Style.RESET_ALL}\n")
+
+        for i, track in enumerate(tracks, 1):
             print(f"{i:3d}. {track.artist_string} - {track.name}")
-        
-        if len(tracks) > 20:
-            print(f"     ... and {len(tracks) - 20} more tracks")
-        
+
         return {
             "success": True,
             "dry_run": True,
             "total_tracks": len(tracks),
-            "tracks_shown": min(20, len(tracks))
+            "tracks_shown": len(tracks)
         }
     
     def _confirm_download(self, track_count: int, batch_size: Optional[int]) -> bool:
@@ -858,16 +897,27 @@ class SpotifyDownloader:
                 result = self.file_manager.move_to_organized_location(temp_path, track, filename)
                 
                 if result.success:
+                    final_path = result.filepath
+
+                    # Replace FLAC with AIFF (runs in a thread so downloads keep flowing)
+                    if self.config.convert_to_aiff and final_path.suffix.lower() == '.flac':
+                        try:
+                            final_path = await asyncio.to_thread(convert_to_aiff, final_path)
+                        except ConversionError as e:
+                            self._clear_print(f"{Fore.YELLOW}⚠ Kept FLAC, AIFF conversion failed: {e}{Style.RESET_ALL}")
+
+                    file_size = final_path.stat().st_size
+
                     self.progress_tracker.mark_track_completed(
                         track.id,
-                        str(result.filepath),
-                        result.file_size
+                        str(final_path),
+                        file_size
                     )
 
                     # Add to catalog with spotify_id
                     try:
                         self.catalog.add_track(
-                            result.filepath,
+                            final_path,
                             playlist_source=self.file_manager.current_playlist_name or '',
                             spotify_id=track.id
                         )
@@ -875,10 +925,10 @@ class SpotifyDownloader:
                         if self.debug_mode:
                             print(f"  Warning: Failed to catalog track: {e}")
 
-                    self._clear_print(f"{Fore.GREEN}✓ Downloaded: {result.filepath.name} ({result.file_size:,} bytes){Style.RESET_ALL}")
+                    self._clear_print(f"{Fore.GREEN}✓ Downloaded: {final_path.name} ({file_size:,} bytes){Style.RESET_ALL}")
 
                     if self.on_track_downloaded:
-                        await self.on_track_downloaded(track, result.filepath)
+                        await self.on_track_downloaded(track, final_path)
                 else:
                     error_msg = result.error_message or "Failed to organize file"
                     print(f"{Fore.RED}Failed to organize file: {error_msg}{Style.RESET_ALL}")

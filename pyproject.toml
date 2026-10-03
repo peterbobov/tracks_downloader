@@ -1,6 +1,6 @@
 [project]
 name = "spotify-downloader"
-version = "3.0.0"
+version = "3.1.0"
 description = "Automate downloading DJ tracks from Spotify playlists via Telegram bot"
 requires-python = ">=3.12"
 dependencies = [
@@ -18,3 +18,8 @@ dependencies = [
 
 [project.scripts]
 spotify-dl = "run:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

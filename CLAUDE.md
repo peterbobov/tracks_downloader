@@ -10,6 +10,7 @@ Automate the process of downloading DJ tracks from Spotify playlists using an ex
 ## Requirements
 - Python 3.12+
 - uv (Python package manager)
+- ffmpeg (`brew install ffmpeg`) for AIFF conversion
 - Spotify Developer Account (for API access)
 - Telegram API credentials (api_id, api_hash from my.telegram.org)
 - Phone number for Telegram account verification
@@ -227,7 +228,7 @@ Settings → Privacy → Active Sessions
 ### Practical Security
 For local personal use, session security is equivalent to any authenticated desktop application. Main rule: treat `sessions/` folder like your `.ssh/` folder - keep it local and protected.
 
-## Quick Start Commands (v3.0.0)
+## Quick Start Commands (v3.1.0)
 
 ```bash
 # Download missing tracks from playlist (default behavior)
@@ -248,6 +249,12 @@ uv run python run.py "https://open.spotify.com/playlist/xxxxx" --start-from 16 -
 # Debug mode
 uv run python run.py "https://open.spotify.com/playlist/xxxxx" --debug
 
+# Also download tracks that only fuzzy-match the library
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --include-similar
+
+# Keep FLAC instead of converting to AIFF
+uv run python run.py "https://open.spotify.com/playlist/xxxxx" --keep-flac
+
 # Rebuild catalog from disk
 uv run python run.py catalog
 
@@ -263,19 +270,24 @@ uv run python run.py reset
 ### Architecture
 - **Thin CLI** (`run.py`) — only parses args, delegates to orchestrator
 - **Orchestrator** (`src/downloader.py`) — owns full flow: fetch → catalog check → download → catalog new
-- **Catalog** (`src/catalog.py`) — SQLite with `spotify_id` as primary dedup key, `artist:title` hash fallback
-- **Telegram Client** (`src/telegram_client.py`) — bot communication and response matching
+- **Catalog** (`src/catalog.py`) — SQLite with `spotify_id` as primary dedup key, normalized `artist:title` hash fallback, then fuzzy `find_similar`
+- **Telegram Client** (`src/telegram_client.py`) — bot communication and response matching. Spotify URLs are sent directly (bot no longer resolves Tidal links). When the bot answers with a search-results menu (`Artist - Title [m:ss]` rows), `pick_search_result` clicks the one row whose artist/base title match and whose length is within 3s of Spotify's; if none fits the track fails. "💾 Скачать страницу" (downloads the whole results page) and other menus are never clicked. Received files are matched to the clicked row by audio tags + length (`file_matches_selection`); files matched by name must also be within 3s of the Spotify length (`duration_agrees`)
 - **File Manager** (`src/file_manager.py`) — file operations only, no catalog awareness
+- **Converter** (`src/converter.py`) — FLAC → AIFF (ffmpeg + mutagen tag/art copy), verifies then deletes FLAC
 - **Spotify API** (`src/spotify_api.py`) — playlist/album/track extraction with caching
 
 ### Key Features
 - **Download only missing tracks by default** — no special flags needed
-- **Spotify ID-based dedup** — reliable, no fuzzy matching needed for library tracks
-- **Self-healing catalog** — backfills Spotify IDs on `artist:title` hash matches
+- **Three-tier dedup** — `spotify_id` → normalized `artist:title` hash (accents/punctuation ignored: "Naté" = "Nate", "A, B" = "A & B") → fuzzy `match_score`. Fuzzy hits are skipped as "probably in library" and listed with their file path; `--include-similar` downloads them anyway. Fuzzy matching never equates different versions: titles must carry the same version markers (remix/extended/edit/dub/...), and remixes must match on remixer too
+- **Dry run shows real plan** — `--dry-run` runs the library check, so it lists only what would actually be downloaded
+- **Self-healing catalog** — backfills Spotify IDs on `artist:title` hash matches; `run.py catalog` rescans preserve existing Spotify IDs; entries whose file was deleted are dropped on lookup; when two files share artist:title, a lossless copy (FLAC/AIFF/WAV) is never replaced by a lossy one
+- **Catalog schema versioning** — `PRAGMA user_version`; v2 recomputed all track IDs with `normalize_for_match` (merging rows that collide)
 - **Auto-cataloging** — downloaded tracks automatically indexed with Spotify ID
 - **WAL mode SQLite** — prevents database lock issues
 - **Unified filename sanitization** — single implementation in `src/utils.py`
 - **Default batch size 3** — matches bot reliability
+- **AIFF output by default** — each downloaded FLAC is converted to AIFF (same bit depth/sample rate, tags + cover art copied) and the FLAC deleted; on failure the FLAC is kept. Existing library files are never converted. 
+- **Rekordbox playlist file** — every run writes `<playlist>/<playlist>.m3u8` (UTF-8, absolute paths, Spotify order) covering all playlist tracks found in the library, including ones that live in other folders. Import in Rekordbox via File → Import → Playlist (dragging the folder only gets newly downloaded tracks)
 
 📁 **Project Structure:**
 ```
@@ -285,11 +297,13 @@ spotify_downloader/
 │   ├── spotify_api.py         # Spotify API interactions
 │   ├── telegram_client.py     # Telegram/Telethon handling
 │   ├── file_manager.py        # Download organization
+│   ├── converter.py           # FLAC → AIFF conversion
 │   ├── catalog.py             # SQLite track database with spotify_id
 │   ├── progress_tracker.py    # Session & progress management
 │   ├── downloader.py          # Main orchestrator
 │   ├── utils.py               # Shared utilities
 │   └── constants.py           # Configuration constants
+├── tests/                     # pytest suite (uv run pytest)
 ├── run.py                     # Thin CLI entry point
 ├── catalog.db                 # SQLite track catalog (auto-created)
 ├── pyproject.toml             # Project config and dependencies (uv)
@@ -329,7 +343,7 @@ SPOTIFY_CLIENT_SECRET=your_client_secret
 TELEGRAM_API_ID=your_api_id
 TELEGRAM_API_HASH=your_api_hash
 TELEGRAM_PHONE_NUMBER=+1234567890
-EXTERNAL_BOT_USERNAME=@your_bot
+EXTERNAL_BOT_USERNAME=@your_bot  # set bot Quality to "High (16bit)" — script converts FLAC → AIFF
 
 # Optional Settings
 MUSIC_LIBRARY_PATH=./music
@@ -344,10 +358,26 @@ RESPONSE_TIMEOUT=600
 - `--limit N`: Maximum tracks to process
 - `--start-from N`: Start from track N (1-indexed)
 - `--sequential`: Process one track at a time
+- `--keep-flac`: Skip AIFF conversion, keep downloaded FLACs
+- `--include-similar`: Also download tracks that only fuzzy-match an existing library file
 - `--debug`: Enable debug output
 
 ## Version History
 
+### v3.1.0 (October 2026) - AIFF Output
+- Added `src/converter.py`: downloaded FLACs are converted to AIFF and replaced (lossless, tags + art preserved)
+- Catalog/progress record the `.aiff` path so dedup keeps working
+- Catalog reads ID3 tags from AIFF; `.aiff`/`.aif` added to supported extensions
+- Added `--keep-flac` flag and pytest suite
+- Back to sending Spotify URLs; removed Tidal conversion (`src/link_converter.py`)
+- Fixed: search-results menu was treated as a "download confirmation" and "Скачать страницу" clicked, downloading ~6 wrong versions per track; now picks one result by artist/title/duration
+- Added `<playlist>.m3u8` export for Rekordbox import
+- Fixed: catalog rescan could keep an MP3 over a FLAC of the same track
+- Fixed: file sent after a selection was dropped when its label differed from Spotify's name; files of a different length are never matched to a track
+- Matching: accent/punctuation-insensitive track IDs (schema v2 migration), fuzzy "probably in library" tier with version-marker guard, `--include-similar` flag
+- Fixed: hash-match Spotify ID backfill never worked (swapped title/artist args)
+- Fixed: `run.py catalog` rescan wiped stored Spotify IDs
+- Fixed: `--dry-run` skipped the library check; `find_track` returned entries for deleted files
 ### v3.0.0 (April 2026) - Clean Architecture & Smart Dedup
 - Deleted 3 legacy files, deleted `missing_tracks.py`
 - Renamed `main.py` → `downloader.py`

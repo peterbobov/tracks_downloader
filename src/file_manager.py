@@ -19,6 +19,7 @@ from datetime import datetime
 
 from .spotify_api import Track
 from .utils import sanitize_filename as _sanitize_filename
+from .constants import FileConstants
 
 
 @dataclass
@@ -34,7 +35,7 @@ class FileConfig:
     
     def __post_init__(self):
         if self.allowed_extensions is None:
-            self.allowed_extensions = ['.flac', '.mp3', '.wav', '.m4a', '.ogg']
+            self.allowed_extensions = list(FileConstants.SUPPORTED_EXTENSIONS)
 
 
 @dataclass
@@ -76,21 +77,21 @@ class FileManager:
         """Set the current playlist name for file organization"""
         self.current_playlist_name = playlist_name
     
-    def get_organized_path(self, track: Track, filename: str) -> Path:
-        """Get the organized file path based on configuration"""
-        base_path = self.download_folder
-        
+    def get_playlist_folder(self) -> Path:
+        """Folder for the current playlist ("Unknown Playlist" if none is set)"""
         # Always use playlist name for organization when available
         if self.current_playlist_name:
-            playlist_folder = self.sanitize_filename(self.current_playlist_name, 100)
-            base_path = base_path / playlist_folder
-        else:
-            # If no playlist name, use "Unknown Playlist" to maintain consistent structure
-            base_path = base_path / "Unknown Playlist"
-        
+            return self.download_folder / self.sanitize_filename(self.current_playlist_name, 100)
+        # If no playlist name, use "Unknown Playlist" to maintain consistent structure
+        return self.download_folder / "Unknown Playlist"
+
+    def get_organized_path(self, track: Track, filename: str) -> Path:
+        """Get the organized file path based on configuration"""
+        base_path = self.get_playlist_folder()
+
         # Create directory if it doesn't exist
         base_path.mkdir(parents=True, exist_ok=True)
-        
+
         return base_path / filename
     
     def generate_filename(self, track: Track, original_filename: Optional[str] = None) -> str:
@@ -342,6 +343,22 @@ class FileManager:
         union = len(set1.union(set2))
         
         return intersection / union if union > 0 else 0.0
+
+
+def write_m3u(path: Path, entries: List[Tuple[Path, int, str]]) -> None:
+    """
+    Write an extended M3U playlist (UTF-8, absolute paths) for Rekordbox import.
+
+    Args:
+        path: Output .m3u8 file
+        entries: (audio file, duration in seconds, display name) in playlist order
+    """
+    lines = ['#EXTM3U']
+    for file_path, duration, name in entries:
+        lines.append(f'#EXTINF:{duration},{name}')
+        lines.append(str(Path(file_path).absolute()))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
 def create_file_manager(download_folder: str = "./downloads", **kwargs) -> FileManager:
