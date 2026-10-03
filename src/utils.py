@@ -58,6 +58,11 @@ def normalize_text(text: str) -> str:
     return result.strip()
 
 
+_LATIN_TRANSLITERATION = str.maketrans({
+    'ø': 'o', 'æ': 'ae', 'œ': 'oe', 'ß': 'ss', 'ł': 'l', 'đ': 'd', 'ð': 'd', 'þ': 'th', 'ı': 'i',
+})
+
+
 def normalize_for_match(text: Optional[str]) -> str:
     """
     Normalize text for library matching.
@@ -68,7 +73,9 @@ def normalize_for_match(text: Optional[str]) -> str:
     """
     if not text:
         return ''
-    result = unicodedata.normalize('NFKD', text)
+    # Letters NFKD does not decompose (ø is not o + accent)
+    result = text.lower().translate(_LATIN_TRANSLITERATION)
+    result = unicodedata.normalize('NFKD', result)
     result = ''.join(c for c in result if not unicodedata.combining(c))
     result = result.lower().replace("'", '').replace('’', '')
     result = re.sub(r'[\W_]+', ' ', result)

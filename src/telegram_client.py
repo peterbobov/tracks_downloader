@@ -45,6 +45,12 @@ SEARCH_RESULT_PATTERN = re.compile(
 # Max difference between Spotify and bot track length to count as the same version
 SEARCH_DURATION_TOLERANCE_S = 3
 
+# Wider length window, allowed only when title and version name match exactly
+EXACT_TITLE_DURATION_TOLERANCE_S = 15
+
+# Base-title similarity needed when the length already matches (mix names vary: "King Mix" vs "Kings Main Mix")
+SAME_LENGTH_TITLE_THRESHOLD = 80
+
 
 def is_search_results(button_texts: List[str]) -> bool:
     """True if the buttons are a search-results menu (track rows with durations)"""
@@ -56,43 +62,67 @@ def _base_title(title: str) -> str:
     return ' '.join(t for t in core_title(title).split() if t not in VERSION_MARKERS)
 
 
+def _same_version(title_a: str, title_b: str) -> bool:
+    """Same title and same version words (strict: no extra subtitle on either side)"""
+    core_a, core_b = core_title(title_a), core_title(title_b)
+    if VERSION_MARKERS.intersection(core_a.split()) != VERSION_MARKERS.intersection(core_b.split()):
+        return False
+    return fuzz.token_sort_ratio(core_a, core_b) >= SIMILARITY_THRESHOLD
+
+
+def _artist_match(artist: str, row_artist: str, row_title: str) -> Optional[str]:
+    """'artist' if the row's artist matches, 'title' if a Spotify artist is only named in the row title"""
+    if fuzz.token_set_ratio(normalize_for_match(artist), normalize_for_match(row_artist)) >= SIMILARITY_THRESHOLD:
+        return 'artist'
+    # Spotify often credits the remixer, the bot the original artist: "Theo Parrish - Falling Up (Carl Craig ...)"
+    credited = f" {normalize_for_match(row_artist + ' ' + row_title)} "
+    names = (normalize_for_match(name) for name in artist.split(','))
+    return 'title' if any(name and f" {name} " in credited for name in names) else None
+
+
 def pick_search_result(button_texts: List[str], artist: str, title: str,
                        duration_ms: int) -> Optional[int]:
     """
     Choose the search result matching a Spotify track.
 
     Stores label versions inconsistently (Spotify's "Isak Original Extended"
-    is plain "Satisfaction" in the bot), so length is the main signal: the
-    artist and base title must match and the length must be within
-    SEARCH_DURATION_TOLERANCE_S; the closest length wins. Without a known
-    duration, the full title including version markers must match.
+    is plain "Satisfaction" in the bot), so length is the main signal:
+    1. Artist and base title match and length is within SEARCH_DURATION_TOLERANCE_S.
+    2. Otherwise, the exact same title and version name within EXACT_TITLE_DURATION_TOLERANCE_S.
+    If the artist is only named in the row's title (remixer credits), the
+    version must match exactly, so covers and karaoke versions never pass.
+    Without a known duration, the full title including version markers must match.
 
     Returns:
         Flat index of the button to click, or None if no result fits
     """
-    target_artist = normalize_for_match(artist)
-    best: Optional[Tuple[Tuple[float, float], int]] = None
+    best: Optional[Tuple[Tuple[int, float, float], int]] = None
 
     for index, text in enumerate(button_texts):
         match = SEARCH_RESULT_PATTERN.match(text.strip())
         if not match:
             continue
-        if fuzz.token_set_ratio(target_artist, normalize_for_match(match['artist'])) < SIMILARITY_THRESHOLD:
+        artist_via = _artist_match(artist, match['artist'], match['title'])
+        if artist_via is None:
+            continue
+        if artist_via == 'title' and not _same_version(title, match['title']):
             continue
 
         score = match_score(title, artist, match['title'], match['artist'])
         if duration_ms:
             length = int(match['min']) * 60 + int(match['sec'])
             diff = abs(length - duration_ms / 1000)
-            if diff > SEARCH_DURATION_TOLERANCE_S:
+            title_similarity = fuzz.token_set_ratio(_base_title(title), _base_title(match['title']))
+            if diff <= SEARCH_DURATION_TOLERANCE_S and title_similarity >= SAME_LENGTH_TITLE_THRESHOLD:
+                key = (0, diff, -score)
+            elif diff <= EXACT_TITLE_DURATION_TOLERANCE_S and _same_version(title, match['title']):
+                key = (1, diff, -score)
+            else:
                 continue
-            if fuzz.token_set_ratio(_base_title(title), _base_title(match['title'])) < SIMILARITY_THRESHOLD:
-                continue
-            key = (diff, -score)
         else:
             if score < SIMILARITY_THRESHOLD:
                 continue
-            key = (0, -score)
+            key = (0, 0, -score)
 
         if best is None or key < best[0]:
             best = (key, index)
@@ -100,13 +130,23 @@ def pick_search_result(button_texts: List[str], artist: str, title: str,
     return best[1] if best else None
 
 
+def duration_agrees(metadata: Dict, duration_ms: int, title: Optional[str] = None) -> bool:
+    """
+    False when a file's length rules it out for a Spotify track.
 
-def duration_agrees(metadata: Dict, duration_ms: int) -> bool:
-    """False only when both lengths are known and differ by more than the tolerance"""
+    Within SEARCH_DURATION_TOLERANCE_S always agrees; up to
+    EXACT_TITLE_DURATION_TOLERANCE_S only if the file's title is the same
+    version as the Spotify title. Unknown lengths never veto.
+    """
     file_duration = metadata.get('duration')
     if not file_duration or not duration_ms:
         return True
-    return abs(file_duration - duration_ms / 1000) <= SEARCH_DURATION_TOLERANCE_S
+    diff = abs(file_duration - duration_ms / 1000)
+    if diff <= SEARCH_DURATION_TOLERANCE_S:
+        return True
+    file_title = metadata.get('title')
+    return bool(title and file_title and diff <= EXACT_TITLE_DURATION_TOLERANCE_S
+                and _same_version(file_title, title))
 
 
 def file_matches_selection(selected_text: Optional[str], metadata: Dict) -> bool:
@@ -609,7 +649,7 @@ class TelegramMessenger:
             spotify_title = request.track.name
 
             # A file of a different length is a different version, whatever its name
-            if not duration_agrees(bot_metadata, request.track.duration_ms):
+            if not duration_agrees(bot_metadata, request.track.duration_ms, request.track.name):
                 match_details.append((request_id, 0.0, f"{spotify_artist} - {spotify_title} (length mismatch)"))
                 continue
 

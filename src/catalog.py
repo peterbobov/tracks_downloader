@@ -35,7 +35,8 @@ except ImportError:
 
 # Catalog schema version (PRAGMA user_version)
 # 2: track IDs use normalize_for_match (accent/punctuation-insensitive)
-SCHEMA_VERSION = 2
+# 3: normalize_for_match transliterates ø/æ/ß/ł/... (IDs recomputed)
+SCHEMA_VERSION = 3
 
 # Formats preferred over lossy copies of the same track
 LOSSLESS_EXTENSIONS = {'.flac', '.aiff', '.aif', '.wav'}
@@ -200,21 +201,27 @@ class LibraryCatalog:
         """Recompute track IDs with the current normalization.
 
         Rows that now share an ID (e.g. "Naté" and "Nate") are merged, keeping
-        the one with a spotify_id, then one whose file exists, then the newest.
+        the one whose file exists, then one with a spotify_id, then the newest;
+        the kept row inherits a spotify_id from a merged row if it has none.
         """
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute('SELECT * FROM tracks')]
         conn.row_factory = None
 
         def preference(row):
-            return (row['spotify_id'] is not None, Path(row['file_path']).exists(), row['date_added'] or '')
+            return (Path(row['file_path']).exists(), row['spotify_id'] is not None, row['date_added'] or '')
 
         best: Dict[str, Dict] = {}
         for row in rows:
             row['id'] = self.generate_track_id(row['title'], row['artist'])
             current = best.get(row['id'])
-            if current is None or preference(row) > preference(current):
+            if current is None:
                 best[row['id']] = row
+                continue
+            winner, loser = (row, current) if preference(row) > preference(current) else (current, row)
+            if winner['spotify_id'] is None:
+                winner['spotify_id'] = loser['spotify_id']
+            best[row['id']] = winner
 
         conn.execute('DELETE FROM tracks')
         columns = list(rows[0].keys()) if rows else []

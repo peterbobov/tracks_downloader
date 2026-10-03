@@ -181,3 +181,51 @@ def test_lossy_copy_replaces_missing_lossless_file(catalog, tmp_path):
     catalog.add_track(make_file(tmp_path, 'copy.mp3'), metadata_override=meta('Low', 'Flo Rida'))
 
     assert catalog.find_track('Low', 'Flo Rida').file_path.endswith('copy.mp3')
+
+
+@pytest.mark.parametrize('a, b', [
+    ('Kasper Bjørke', 'Kasper Bjorke'),
+    ('Røyksopp', 'Royksopp'),
+    ('Ætherial', 'Aetherial'),
+    ('Straße', 'Strasse'),
+    ('Łukasz', 'Lukasz'),
+])
+def test_normalize_transliterates_special_latin_letters(a, b):
+    assert normalize_for_match(a) == normalize_for_match(b)
+
+
+def test_migration_rehashes_special_latin_letters(tmp_path):
+    db = tmp_path / 'catalog.db'
+    LibraryCatalog(str(db))
+    with sqlite3.connect(db) as conn:
+        conn.execute('PRAGMA user_version = 2')  # IDs from before ø → o transliteration
+        conn.execute(
+            'INSERT INTO tracks (id, spotify_id, title, artist, file_path, date_added, file_size) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (old_track_id('Heaven', 'Kasper Bjørke'), 'sp9', 'Heaven', 'Kasper Bjørke',
+             str(make_file(tmp_path, 'h.flac')), '2026-01-01', 2048))
+
+    catalog = LibraryCatalog(str(db))
+
+    assert catalog.find_track('Heaven', 'Kasper Bjorke').spotify_id == 'sp9'
+
+
+def test_migration_prefers_existing_file_and_keeps_spotify_id(tmp_path):
+    db = tmp_path / 'catalog.db'
+    LibraryCatalog(str(db))
+    aiff = make_file(tmp_path, 'h.aiff')
+    with sqlite3.connect(db) as conn:
+        conn.execute('PRAGMA user_version = 2')
+        insert = ('INSERT INTO tracks (id, spotify_id, title, artist, file_path, date_added, file_size) '
+                  'VALUES (?, ?, ?, ?, ?, ?, ?)')
+        # Stale FLAC entry (converted away) holding the spotify_id, under the old hash
+        conn.execute(insert, (old_track_id('Heaven', 'Kasper Bjørke'), 'sp9', 'Heaven', 'Kasper Bjørke',
+                              str(tmp_path / 'h.flac'), '2026-01-01', 2048))
+        # Rescanned AIFF entry without spotify_id
+        conn.execute(insert, ('other-id', None, 'Heaven', 'Kasper Bjorke', str(aiff), '2026-01-02', 2048))
+
+    catalog = LibraryCatalog(str(db))
+
+    hit = catalog.find_track('Heaven', 'Kasper Bjørke')
+    assert hit.file_path == str(aiff)
+    assert hit.spotify_id == 'sp9'

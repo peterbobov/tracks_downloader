@@ -271,7 +271,7 @@ uv run python run.py reset
 - **Thin CLI** (`run.py`) — only parses args, delegates to orchestrator
 - **Orchestrator** (`src/downloader.py`) — owns full flow: fetch → catalog check → download → catalog new
 - **Catalog** (`src/catalog.py`) — SQLite with `spotify_id` as primary dedup key, normalized `artist:title` hash fallback, then fuzzy `find_similar`
-- **Telegram Client** (`src/telegram_client.py`) — bot communication and response matching. Spotify URLs are sent directly (bot no longer resolves Tidal links). When the bot answers with a search-results menu (`Artist - Title [m:ss]` rows), `pick_search_result` clicks the one row whose artist/base title match and whose length is within 3s of Spotify's; if none fits the track fails. "💾 Скачать страницу" (downloads the whole results page) and other menus are never clicked. Received files are matched to the clicked row by audio tags + length (`file_matches_selection`); files matched by name must also be within 3s of the Spotify length (`duration_agrees`)
+- **Telegram Client** (`src/telegram_client.py`) — bot communication and response matching. Spotify URLs are sent directly (bot no longer resolves Tidal links). When the bot answers with a search-results menu (`Artist - Title [m:ss]` rows), `pick_search_result` clicks one row: (1) artist + base title match (≥80 when lengths agree) and length within 3s of Spotify's, else (2) exact same title and version name within 15s. The artist may also match via the bot's title (Spotify credits remixers, the bot the original artist) — then the version must match exactly so covers/karaoke never pass. If none fits the track fails. "💾 Скачать страницу" (downloads the whole results page) and other menus are never clicked. Received files are matched to the clicked row by audio tags + length (`file_matches_selection`); files matched by name must also be within 3s of the Spotify length, or 15s with the exact same title/version (`duration_agrees`)
 - **File Manager** (`src/file_manager.py`) — file operations only, no catalog awareness
 - **Converter** (`src/converter.py`) — FLAC → AIFF (ffmpeg + mutagen tag/art copy), verifies then deletes FLAC
 - **Spotify API** (`src/spotify_api.py`) — playlist/album/track extraction with caching
@@ -281,7 +281,7 @@ uv run python run.py reset
 - **Three-tier dedup** — `spotify_id` → normalized `artist:title` hash (accents/punctuation ignored: "Naté" = "Nate", "A, B" = "A & B") → fuzzy `match_score`. Fuzzy hits are skipped as "probably in library" and listed with their file path; `--include-similar` downloads them anyway. Fuzzy matching never equates different versions: titles must carry the same version markers (remix/extended/edit/dub/...), and remixes must match on remixer too
 - **Dry run shows real plan** — `--dry-run` runs the library check, so it lists only what would actually be downloaded
 - **Self-healing catalog** — backfills Spotify IDs on `artist:title` hash matches; `run.py catalog` rescans preserve existing Spotify IDs; entries whose file was deleted are dropped on lookup; when two files share artist:title, a lossless copy (FLAC/AIFF/WAV) is never replaced by a lossy one
-- **Catalog schema versioning** — `PRAGMA user_version`; v2 recomputed all track IDs with `normalize_for_match` (merging rows that collide)
+- **Catalog schema versioning** — `PRAGMA user_version`; v2 recomputed all track IDs with `normalize_for_match`, v3 again after adding ø/æ/ß/ł transliteration. Merges keep the row whose file exists, inheriting a spotify_id from merged rows
 - **Auto-cataloging** — downloaded tracks automatically indexed with Spotify ID
 - **WAL mode SQLite** — prevents database lock issues
 - **Unified filename sanitization** — single implementation in `src/utils.py`
@@ -414,6 +414,7 @@ How it works (derived by diffing `master.db` + ANLZ files before/after a real Re
 - Back to sending Spotify URLs; removed Tidal conversion (`src/link_converter.py`)
 - Fixed: search-results menu was treated as a "download confirmation" and "Скачать страницу" clicked, downloading ~6 wrong versions per track; now picks one result by artist/title/duration
 - Added `<playlist>.m3u8` export for Rekordbox import
+- Matching: ø/æ/ß/ł transliteration (schema v3), remixer-credit artist matching, 15s window for exact title/version matches
 - Fixed: catalog rescan could keep an MP3 over a FLAC of the same track
 - Fixed: file sent after a selection was dropped when its label differed from Spotify's name; files of a different length are never matched to a track
 - Matching: accent/punctuation-insensitive track IDs (schema v2 migration), fuzzy "probably in library" tier with version-marker guard, `--include-similar` flag

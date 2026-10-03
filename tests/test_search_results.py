@@ -125,3 +125,63 @@ def test_duration_rejects_other_version():
 def test_duration_unknown_on_either_side_is_not_a_veto():
     assert duration_agrees({}, ms(4, 45))
     assert duration_agrees({'duration': 259}, 0)
+
+
+# MARK: - False negatives found in real runs
+
+def test_special_latin_letters_in_artist():
+    buttons = ['Kasper Bjorke - Heaven (Nicolas Jaar Remix) [5:17]']
+    assert pick_search_result(buttons, 'Kasper Bjørke, Nicolas Jaar', 'Heaven - Nicolas Jaar Remix', 317_100) == 0
+
+
+def test_spotify_artist_credited_in_bot_title():
+    # Spotify credits the remixer; the bot credits the original artist
+    buttons = ['Theo Parrish - Falling Up (Carl Craig 2013 Remaster) [8:25]']
+    assert pick_search_result(buttons, 'Carl Craig', 'Falling Up - Carl Craig 2013 Remaster', 505_900) == 0
+
+
+def test_mix_name_variation_with_matching_length():
+    buttons = [
+        "Wamdue Project - King of My Castle - Roy Malone's King Radio Edit [3:35]",
+        'Wamdue Project - King of My Castle - Roy Malone Kings Main Mix [4:58]',
+        'Wamdue Project - King of My Castle [3:26]',
+    ]
+    assert pick_search_result(buttons, 'Wamdue Project, Roy Malone',
+                              "King of My Castle (Roy Malone's King Mix)", ms(4, 59) + 700) == 1
+
+
+def test_exact_title_allows_up_to_15s_length_difference():
+    buttons = ['Key Tronics Ensemble - Calypso of House - Paradise Mix [9:21]',
+               'Key Tronics Ensemble - House Of Calypso [8:33]']
+    assert pick_search_result(buttons, 'Key Tronics Ensemble', 'Calypso of House - Paradise Mix', ms(9, 8)) == 0
+
+    buttons = ['Kings of Tomorrow - Finally - Kevin Yost Dubified Remix [6:28]',
+               'Kings of Tomorrow - Finally [5:11]']
+    assert pick_search_result(buttons, 'Kings Of Tomorrow, Julie Mc Knight', 'Finally', ms(5, 15) + 800) == 1
+
+
+def test_15s_rule_never_accepts_other_versions():
+    # Different version marker (remix/dub) or partial title: still rejected even if close in length
+    assert pick_search_result(['Tour-Maubourg - Ode to Love (Saudade Remix) [4:36]'],
+                              'Tour-Maubourg', 'Ode to Love', ms(4, 21)) is None
+    assert pick_search_result(['Cobblestone Jazz - Chance [7:58]'],
+                              'Cobblestone Jazz', 'Chance Dub', ms(7, 41)) is None
+    assert pick_search_result(['The Believers - Believe [8:20]'],
+                              'The Believers', 'Who Dares to Believe in Me?', ms(8, 11)) is None
+    # Exact title but more than 15s apart
+    assert pick_search_result(['Traumer - Classroom [6:08]'], 'Traumer', 'Classroom', ms(8, 36)) is None
+
+
+def test_direct_file_length_rule_matches_menu_rule():
+    # A file 4.8s shorter with the exact title is accepted; a remix 26s shorter is not
+    assert duration_agrees({'duration': 311, 'title': 'Finally'}, ms(5, 15) + 800, 'Finally')
+    assert not duration_agrees({'duration': 259, 'title': 'Satisfaction (RL Grime Remix)'},
+                               ms(4, 45), 'Satisfaction - Isak Original Extended')
+    assert not duration_agrees({'duration': 311, 'title': 'Something Else'}, ms(5, 15) + 800, 'Finally')
+
+
+def test_artist_named_only_in_title_requires_same_version():
+    # "Benny Benassi" appears in these titles, but they are a cover and a karaoke version
+    buttons = ['Alon Renser - Satisfaction (Benny Benassi Cover) [4:45]',
+               'Ameritz Countdown Karaoke - Satisfaction (In the Style of Benny Benassi) [Karaoke Version] [4:45]']
+    assert pick_search_result(buttons, 'Benny Benassi', 'Satisfaction', ms(4, 45)) is None
